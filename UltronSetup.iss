@@ -1,4 +1,4 @@
-#define MyAppName "ULTRON Panel"
+﻿#define MyAppName "ULTRON Panel"
 #define MyAppVersion "3.0"
 #define MyAppPublisher "NATH-DEVcode"
 
@@ -31,7 +31,6 @@ Source: "skills\*"; DestDir: "{app}\skills"; Flags: ignoreversion recursesubdirs
 Source: "themes\*"; DestDir: "{app}\themes"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "config\ai.conf"; DestDir: "{app}\config"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "config\ia.conf"; DestDir: "{app}\config"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "config\user.txt"; DestDir: "{app}\config"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "config.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "requirements-windows.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "setup-ultron.ps1"; DestDir: "{app}"; Flags: ignoreversion
