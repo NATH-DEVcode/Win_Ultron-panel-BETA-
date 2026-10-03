@@ -1,0 +1,12 @@
+{
+    "welcome": "ULTRON'a hoş geldiniz",
+    "system_ready": "Sistem hazır, nath",
+    "waiting": "Komutlar bekleniyor...",
+    "exit": "ULTRON kapatılıyor...",
+    "verify_identity": "Kimlik doğrulanıyor...",
+    "identity_ok": "Kimlik doğrulandı",
+    "identity_error": "Kimlik hatası",
+    "recovery": "Kurtarma başlatılıyor...",
+    "invalid_option": "Geçersiz seçenek",
+    "loading": "Sistem yükleniyor..."
+}

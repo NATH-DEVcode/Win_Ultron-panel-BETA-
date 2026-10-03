@@ -1,0 +1,16 @@
+{
+    "name": "English",
+    "menu": "MAIN MENU",
+    "preferences": "PREFERENCES",
+    "themes": "THEMES",
+    "language": "LANGUAGE",
+    "appearance": "APPEARANCE",
+    "animations": "ANIMATIONS",
+    "restore": "RESTORE CONFIGURATION",
+    "information": "ULTRON INFORMATION",
+    "back": "Back",
+    "home": "Home",
+    "exit": "Exit",
+    "select": "Select an option",
+    "developing": "Module in development"
+}

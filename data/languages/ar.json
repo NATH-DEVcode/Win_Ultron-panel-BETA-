@@ -1,0 +1,12 @@
+{
+    "welcome": "مرحبًا بك في ULTRON",
+    "system_ready": "النظام جاهز، nath",
+    "waiting": "في انتظار الأوامر...",
+    "exit": "إغلاق ULTRON...",
+    "verify_identity": "جاري التحقق من الهوية...",
+    "identity_ok": "تم التحقق من الهوية",
+    "identity_error": "خطأ في الهوية",
+    "recovery": "بدء الاستعادة...",
+    "invalid_option": "خيار غير صالح",
+    "loading": "جاري تحميل النظام..."
+}

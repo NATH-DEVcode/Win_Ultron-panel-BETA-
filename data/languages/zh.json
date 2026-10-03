@@ -1,0 +1,12 @@
+{
+    "welcome": "欢迎使用 ULTRON",
+    "system_ready": "系统准备完成，nath",
+    "waiting": "等待指令...",
+    "exit": "正在关闭 ULTRON...",
+    "verify_identity": "正在验证身份...",
+    "identity_ok": "身份验证成功",
+    "identity_error": "身份验证错误",
+    "recovery": "正在启动恢复...",
+    "invalid_option": "无效选项",
+    "loading": "正在加载系统..."
+}

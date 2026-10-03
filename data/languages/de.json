@@ -1,0 +1,12 @@
+{
+    "welcome": "Willkommen bei ULTRON",
+    "system_ready": "System bereit, nath",
+    "waiting": "Warte auf Anweisungen...",
+    "exit": "ULTRON wird geschlossen...",
+    "verify_identity": "Identität wird überprüft...",
+    "identity_ok": "Identität bestätigt",
+    "identity_error": "Identitätsfehler",
+    "recovery": "Wiederherstellung wird gestartet...",
+    "invalid_option": "Ungültige Option",
+    "loading": "System wird geladen..."
+}

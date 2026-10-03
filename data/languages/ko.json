@@ -1,0 +1,12 @@
+{
+    "welcome": "ULTRON에 오신 것을 환영합니다",
+    "system_ready": "시스템 준비 완료, nath",
+    "waiting": "명령을 기다리는 중...",
+    "exit": "ULTRON을 종료합니다...",
+    "verify_identity": "신원 확인 중...",
+    "identity_ok": "신원 확인 완료",
+    "identity_error": "신원 오류",
+    "recovery": "복구를 시작합니다...",
+    "invalid_option": "잘못된 선택입니다",
+    "loading": "시스템을 불러오는 중..."
+}

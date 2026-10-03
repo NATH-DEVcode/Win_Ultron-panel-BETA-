@@ -1,0 +1,12 @@
+{
+    "welcome": "ULTRONへようこそ",
+    "system_ready": "システム準備完了、nath",
+    "waiting": "指示を待っています...",
+    "exit": "ULTRONを終了しています...",
+    "verify_identity": "本人確認中...",
+    "identity_ok": "本人確認完了",
+    "identity_error": "本人確認エラー",
+    "recovery": "復旧を開始しています...",
+    "invalid_option": "無効な選択です",
+    "loading": "システムを読み込んでいます..."
+}

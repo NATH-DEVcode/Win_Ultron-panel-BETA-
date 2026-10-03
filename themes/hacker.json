@@ -1,0 +1,10 @@
+{
+    "name": "Hacker",
+    "title": "bright_green",
+    "border": "green",
+    "text": "green",
+    "menu": "bright_green",
+    "success": "green",
+    "warning": "yellow",
+    "error": "red"
+}

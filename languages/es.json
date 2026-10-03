@@ -1,0 +1,16 @@
+{
+    "name": "Español",
+    "menu": "MENÚ PRINCIPAL",
+    "preferences": "PREFERENCIAS",
+    "themes": "TEMAS",
+    "language": "IDIOMA",
+    "appearance": "APARIENCIA",
+    "animations": "ANIMACIONES",
+    "restore": "RESTAURAR CONFIGURACIÓN",
+    "information": "INFORMACIÓN DE ULTRON",
+    "back": "Volver",
+    "home": "Inicio",
+    "exit": "Salir",
+    "select": "Seleccione una opción",
+    "developing": "Módulo en desarrollo"
+}

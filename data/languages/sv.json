@@ -1,0 +1,13 @@
+{
+    "welcome": "Välkommen till ULTRON",
+    "system_ready": "Systemet är klart, nath",
+    "waiting": "Väntar på instruktioner...",
+    "exit": "Stänger ULTRON...",
+    "verify_identity": "Verifierar identitet...",
+    "identity_ok": "Identitet verifierad",
+    "identity_error": "Identitetsfel",
+    "recovery": "Startar återställning...",
+    "invalid_option": "Ogiltigt alternativ",
+    "loading": "Laddar systemet..."
+}
+

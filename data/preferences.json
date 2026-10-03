@@ -1,0 +1,15 @@
+{
+    "theme": "Matrix",
+    "colors": {
+        "banner_logo": "#00ff00",
+        "banner_subtitle": "#66ff66",
+        "border": "#008800",
+        "title": "#00ff00",
+        "text": "#00aa00",
+        "menu": "#66ff66",
+        "success": "#00ff00",
+        "warning": "#ccff00",
+        "error": "#ff4444",
+        "info": "#66ff66"
+    }
+}

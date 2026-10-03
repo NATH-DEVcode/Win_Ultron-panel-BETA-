@@ -1,0 +1,13 @@
+{
+    "welcome": "Welkom bij ULTRON",
+    "system_ready": "Systeem gereed, nath",
+    "waiting": "Wachten op instructies...",
+    "exit": "ULTRON wordt afgesloten...",
+    "verify_identity": "Identiteit controleren...",
+    "identity_ok": "Identiteit bevestigd",
+    "identity_error": "Identiteitsfout",
+    "recovery": "Herstel wordt gestart...",
+    "invalid_option": "Ongeldige optie",
+    "loading": "Systeem laden..."
+}
+

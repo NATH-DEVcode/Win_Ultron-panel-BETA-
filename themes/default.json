@@ -1,0 +1,10 @@
+{
+    "name": "Default",
+    "title": "bright_cyan",
+    "border": "cyan",
+    "text": "white",
+    "menu": "cyan",
+    "success": "green",
+    "warning": "yellow",
+    "error": "red"
+}

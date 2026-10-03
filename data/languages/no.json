@@ -1,0 +1,12 @@
+{
+    "welcome": "Velkommen til ULTRON",
+    "system_ready": "Systemet er klart, nath",
+    "waiting": "Venter på instruksjoner...",
+    "exit": "Lukker ULTRON...",
+    "verify_identity": "Bekrefter identitet...",
+    "identity_ok": "Identitet bekreftet",
+    "identity_error": "Identitetsfeil",
+    "recovery": "Starter gjenoppretting...",
+    "invalid_option": "Ugyldig alternativ",
+    "loading": "Laster system..."
+}

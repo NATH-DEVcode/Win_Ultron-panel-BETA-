@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>ULTRON EYE // GLOBAL</title>
+<style>
+html,body,#globe{margin:0;width:100%;height:100%;overflow:hidden;background:#030303;font-family:monospace}
+#hud{position:fixed;z-index:4;top:16px;left:18px;color:#ff3b30;letter-spacing:2px;font-weight:bold}
+#layers{position:fixed;z-index:4;top:16px;right:18px;display:flex;gap:7px}
+button{background:#090909;color:#ddd;border:1px solid #ff3b30;border-radius:11px;padding:8px 14px;font:700 11px monospace;cursor:pointer}
+button.on{background:#ff3b30;color:#050505} #status{position:fixed;z-index:4;bottom:14px;left:18px;color:#777;font-size:10px}
+</style>
+<script src="https://unpkg.com/globe.gl"></script></head>
+<body><div id="globe"></div><div id="hud">ULTRON EYE // GLOBAL</div>
+<div id="layers"><button class="on">AIR</button><button class="on">SEA</button><button class="on">CAM</button><button class="on">RADIO</button></div>
+<div id="status">GLOBAL VIEW // DRAG TO ROTATE // WHEEL TO ZOOM</div>
+<script>
+const g=Globe()(document.getElementById('globe'))
+ .globeImageUrl('https://unpkg.com/three-globe/example/img/earth-night.jpg')
+ .backgroundImageUrl('https://unpkg.com/three-globe/example/img/night-sky.png')
+ .atmosphereColor('#ff3b30').atmosphereAltitude(.13);
+g.controls().autoRotate=true; g.controls().autoRotateSpeed=.25;
+g.pointOfView({lat:20,lng:-20,altitude:2.1});
+document.querySelectorAll('button').forEach(b=>b.onclick=()=>b.classList.toggle('on'));
+window.addEventListener('resize',()=>g.width(innerWidth).height(innerHeight));
+</script></body></html>

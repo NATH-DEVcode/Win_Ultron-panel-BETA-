@@ -1,0 +1,12 @@
+{
+    "welcome": "Tervetuloa ULTRONiin",
+    "system_ready": "Järjestelmä valmis, nath",
+    "waiting": "Odotetaan komentoja...",
+    "exit": "Suljetaan ULTRON...",
+    "verify_identity": "Vahvistetaan henkilöllisyyttä...",
+    "identity_ok": "Henkilöllisyys vahvistettu",
+    "identity_error": "Henkilöllisyysvirhe",
+    "recovery": "Käynnistetään palautus...",
+    "invalid_option": "Virheellinen vaihtoehto",
+    "loading": "Ladataan järjestelmää..."
+}
