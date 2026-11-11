@@ -1,6 +1,7 @@
 from core.ui import module_banner, menu_box, clear
 from core.navigation import check_navigation
 import subprocess
+import os
 
 
 def run_command(command):
@@ -8,7 +9,7 @@ def run_command(command):
     try:
         result = subprocess.check_output(
             command,
-            shell=True,
+            shell=False,
             text=True,
             stderr=subprocess.DEVNULL
         )
@@ -68,7 +69,7 @@ def files_menu():
             print("\nEspacio del disco:\n")
 
             print(
-                run_command("df -h")
+                run_command(["df", "-h"])
             )
 
             input("\nENTER para continuar")
@@ -85,7 +86,7 @@ def files_menu():
 
             print(
                 run_command(
-                    f"find ~ -name '{nombre}' 2>/dev/null"
+                    ["find", os.path.expanduser("~"), "-iname", nombre]
                 )
             )
 
@@ -98,7 +99,7 @@ def files_menu():
             print("\nContenido de la carpeta actual:\n")
 
             print(
-                run_command("ls -lah")
+                run_command(["ls", "-lah"])
             )
 
             input("\nENTER para continuar")
@@ -110,7 +111,7 @@ def files_menu():
             print("\nInformación de almacenamiento:\n")
 
             print(
-                run_command("lsblk")
+                run_command(["lsblk"])
             )
 
             input("\nENTER para continuar")

@@ -8,7 +8,7 @@ def run_command(command):
     try:
         return subprocess.check_output(
             command,
-            shell=True,
+            shell=False,
             text=True,
             stderr=subprocess.DEVNULL
         ).strip()
@@ -73,7 +73,7 @@ def packages_menu():
 
             print(
                 run_command(
-                    f"apt-cache search {name}"
+                    ["apt-cache", "search", name]
                 )
             )
 
@@ -89,7 +89,7 @@ def packages_menu():
 
             print(
                 run_command(
-                    "apt list --installed"
+                    ["apt", "list", "--installed"]
                 )
             )
 
@@ -105,7 +105,7 @@ def packages_menu():
 
             print(
                 run_command(
-                    "sudo apt update"
+                    ["sudo", "apt", "update"]
                 )
             )
 
@@ -121,7 +121,7 @@ def packages_menu():
 
             print(
                 run_command(
-                    "sudo apt upgrade"
+                    ["sudo", "apt", "upgrade"]
                 )
             )
 
@@ -137,7 +137,7 @@ def packages_menu():
 
             print(
                 run_command(
-                    "sudo apt autoremove"
+                    ["sudo", "apt", "autoremove"]
                 )
             )
 

@@ -44,11 +44,17 @@ class UltronSystemBridge:
     def network_module(self):
         return platform.network_info()
 
+    def network_snapshot(self):
+        return platform.network_snapshot()
+
     def security_module(self):
         return platform.security_info()
 
     def files_module(self):
         return platform.disk_info()
+
+    def installed_programs(self, limit=40):
+        return platform.installed_programs(limit=limit)
 
     def processes_module(self):
         return platform.process_info()
@@ -56,8 +62,14 @@ class UltronSystemBridge:
     def battery_module(self):
         return platform.battery_info()
 
+    def battery_status(self):
+        return platform.battery_status()
+
     def temperature_module(self):
         return platform.temperature_info()
+
+    def cpu_temperature(self):
+        return platform.cpu_temperature_c()
 
     # -------- Acciones --------
     def open_url(self, url):

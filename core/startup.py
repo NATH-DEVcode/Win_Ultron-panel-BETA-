@@ -66,7 +66,7 @@ def boot_sequence():
 
 
     loading(
-        "Inicializando nÃºcleo..."
+        "Inicializando núcleo..."
     )
 
 
@@ -76,7 +76,7 @@ def boot_sequence():
     if verify_identity():
 
         loading(
-            "âœ“ Identidad verificada"
+            "✓ Identidad verificada"
         )
 
         write_log(
@@ -87,7 +87,7 @@ def boot_sequence():
     else:
 
         loading(
-            "âœ— Identidad fallida"
+            "✗ Identidad fallida"
         )
 
         write_log(
@@ -100,12 +100,12 @@ def boot_sequence():
 
 
     loading(
-        "âœ“ Sistema cargado"
+        "✓ Sistema cargado"
     )
 
 
     loading(
-        "âœ“ MÃ³dulos listos"
+        "✓ Módulos listos"
     )
 
 

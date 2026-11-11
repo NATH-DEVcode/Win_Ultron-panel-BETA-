@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ULTRON // CORE  -  GUI V2
-Centro de operaciones futurista para Linux
+Centro de operaciones futurista para Windows
 Estética: negro + naranja | Core con anillos orbitando | Mapa plano
 """
 
@@ -16,17 +16,23 @@ from pathlib import Path
 import json
 import os
 import re
+import unicodedata
+import base64
+import ctypes
+from ctypes import wintypes
 import threading
 import shlex
 import tempfile
 import shutil
 import urllib.request
 import urllib.error
+from urllib.parse import urlsplit
 import uuid
 import sqlite3
 import hashlib
 import secrets
 import wave
+import zlib
 
 from core.system_bridge import create_bridge
 
@@ -56,6 +62,175 @@ TEXT          = "#e0e0e0"
 TEXT_DIM      = "#888888"
 GREEN         = "#00cc66"
 RED           = "#ff3333"
+
+VOICE_ALERT_CONFIG = (
+    Path(__file__).resolve().parent.parent / "config" / "ultron_features.json"
+)
+DEFAULT_FEATURE_CONFIG = {
+    "voice": {
+        "apps": {
+            "calculadora": ["calc.exe"],
+            "bloc de notas": ["notepad.exe"],
+            "explorador de archivos": ["explorer.exe"],
+            "paint": ["mspaint.exe"],
+        },
+        "websites": {
+            "google": "https://www.google.com/",
+            "youtube": "https://www.youtube.com/",
+            "whatsapp": "https://web.whatsapp.com/",
+            "chatgpt": "https://chatgpt.com/",
+        },
+    },
+    "alerts": {
+        "sample_seconds": 5,
+        "cpu_percent": 85,
+        "cpu_sustained_seconds": 30,
+        "memory_percent": 90,
+        "disk_percent": 90,
+        "battery_percent": 15,
+        "temperature_c": 85,
+        "ping_ms": 180,
+        "network_loss_after_failures": 3,
+        "beep_enabled": True,
+    },
+}
+
+
+def _normalize_voice_text(value):
+    text = unicodedata.normalize("NFKD", str(value or "").casefold())
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def _load_feature_config():
+    """Carga allowlists y umbrales editables; si faltan, usa valores seguros."""
+    try:
+        with VOICE_ALERT_CONFIG.open("r", encoding="utf-8") as config_file:
+            raw = json.load(config_file)
+        if not isinstance(raw, dict):
+            raise ValueError("La raíz del JSON debe ser un objeto.")
+    except (OSError, ValueError, TypeError):
+        raw = {}
+
+    voice = raw.get("voice", {})
+    if not isinstance(voice, dict):
+        voice = {}
+
+    raw_apps = voice.get("apps", DEFAULT_FEATURE_CONFIG["voice"]["apps"])
+    apps = {}
+    if isinstance(raw_apps, dict):
+        for name, command in raw_apps.items():
+            if (
+                isinstance(name, str)
+                and name.strip()
+                and isinstance(command, list)
+                and command
+                and all(isinstance(part, str) and part.strip() for part in command)
+            ):
+                apps[name.strip()] = [part.strip() for part in command]
+
+    raw_sites = voice.get("websites", DEFAULT_FEATURE_CONFIG["voice"]["websites"])
+    websites = {}
+    if isinstance(raw_sites, dict):
+        for name, url in raw_sites.items():
+            if not isinstance(name, str) or not isinstance(url, str):
+                continue
+            parsed = urlsplit(url.strip())
+            if (
+                name.strip()
+                and parsed.scheme in ("http", "https")
+                and parsed.hostname
+                and not parsed.username
+            ):
+                websites[name.strip()] = url.strip()
+
+    alerts = raw.get("alerts", {})
+    if not isinstance(alerts, dict):
+        alerts = {}
+    alert_config = dict(DEFAULT_FEATURE_CONFIG["alerts"])
+    for key, value in alerts.items():
+        if key not in alert_config:
+            continue
+        if key == "beep_enabled":
+            if isinstance(value, bool):
+                alert_config[key] = value
+        else:
+            try:
+                alert_config[key] = max(0.0, float(value))
+            except (TypeError, ValueError):
+                pass
+
+    return {"voice": {"apps": apps, "websites": websites}, "alerts": alert_config}
+
+# Fronteras internacionales simplificadas para dar escala sin llenar el mapa
+# de límites administrativos. Coordenadas geográficas (longitud, latitud).
+MAJOR_COUNTRY_BORDERS = (
+    # Alaska / Canadá.
+    ((-141, 69), (-141, 66), (-141, 63), (-141, 60)),
+    # Canadá / Estados Unidos, incluida la salida hacia los Grandes Lagos.
+    ((-123, 49), (-118, 49), (-114, 49), (-110, 49), (-106, 49),
+     (-102, 49), (-98, 49), (-95, 49), (-92, 47), (-89, 47),
+     (-86, 45), (-83, 45), (-80, 43), (-77, 44), (-74, 45), (-71, 45)),
+    # Estados Unidos / México.
+    ((-117, 32.5), (-114.8, 32.5), (-111.1, 31.3), (-108.2, 31.3),
+     (-106.5, 31.8), (-104.4, 29.6), (-103, 29), (-102, 29.8),
+     (-100.5, 29.4), (-99.2, 27.5), (-97.2, 25.9)),
+    # Chile / Argentina, siguiendo de forma estilizada la cordillera andina.
+    ((-69, -22), (-68, -27), (-69, -32), (-70, -37), (-71, -42),
+     (-72, -47), (-73, -52)),
+)
+
+
+def _tint_outline_png(png_data, color):
+    """Recolorea el PNG de contornos sin depender de Pillow."""
+    try:
+        if png_data[:8] != b"\x89PNG\r\n\x1a\n":
+            raise ValueError("PNG no válido")
+        offset = 8
+        chunks = []
+        image_data = bytearray()
+        width = height = bit_depth = color_type = interlace = None
+        while offset < len(png_data):
+            size = int.from_bytes(png_data[offset:offset + 4], "big")
+            kind = png_data[offset + 4:offset + 8]
+            payload = png_data[offset + 8:offset + 8 + size]
+            offset += size + 12
+            if kind == b"IHDR":
+                width = int.from_bytes(payload[:4], "big")
+                height = int.from_bytes(payload[4:8], "big")
+                bit_depth, color_type, interlace = payload[8], payload[9], payload[12]
+                chunks.append((kind, payload))
+            elif kind == b"IDAT":
+                image_data.extend(payload)
+            elif kind == b"IEND":
+                break
+        if bit_depth != 8 or color_type != 6 or interlace != 0:
+            raise ValueError("Formato de mapa no compatible")
+
+        rgb = bytes.fromhex(color.lstrip("#"))
+        pixels = bytearray(zlib.decompress(image_data))
+        stride = width * 4
+        for y in range(height):
+            row_start = y * (stride + 1)
+            if pixels[row_start] != 0:
+                raise ValueError("Filtro de mapa no compatible")
+            for pos in range(row_start + 1, row_start + 1 + stride, 4):
+                if pixels[pos + 3]:
+                    pixels[pos:pos + 3] = rgb
+
+        def make_chunk(kind, payload):
+            return (
+                len(payload).to_bytes(4, "big") + kind + payload
+                + (zlib.crc32(kind + payload) & 0xffffffff).to_bytes(4, "big")
+            )
+
+        result = b"\x89PNG\r\n\x1a\n"
+        result += make_chunk(b"IHDR", chunks[0][1])
+        result += make_chunk(b"IDAT", zlib.compress(bytes(pixels), 6))
+        result += make_chunk(b"IEND", b"")
+        return base64.b64encode(result).decode("ascii")
+    except Exception:
+        return base64.b64encode(png_data).decode("ascii")
 
 
 # ============================================================
@@ -118,6 +293,23 @@ THEMES = {
         "DANGER": "#ff4655",
     },
 
+    "COBALT DRIVE": {
+        "BG": "#070914",
+        "BG_PANEL": "#0e1224",
+        "BG_PANEL2": "#171d35",
+        "PRIMARY": "#5577ff",
+        "PRIMARY_L": "#9aabff",
+        "PRIMARY_D": "#354eb8",
+        "PRIMARY_DIM": "#202d66",
+        "SECONDARY": "#ff7bd5",
+        "SECONDARY_D": "#b94e98",
+        "SECONDARY_DIM": "#512343",
+        "TEXT": "#f0f1ff",
+        "TEXT_DIM": "#969bb8",
+        "GOOD": "#58e6a5",
+        "DANGER": "#ff5968",
+    },
+
     "VOID PROTOCOL": {
         "BG": "#030304",
         "BG_PANEL": "#0b0b10",
@@ -150,6 +342,91 @@ THEMES = {
         "TEXT_DIM": "#6f9477",
         "GOOD": "#57ff80",
         "DANGER": "#ff4a4a",
+    },
+
+    "ARCTIC CIRCUIT": {
+        "BG": "#040a10",
+        "BG_PANEL": "#081522",
+        "BG_PANEL2": "#0d2030",
+        "PRIMARY": "#44c8ff",
+        "PRIMARY_L": "#9be4ff",
+        "PRIMARY_D": "#1682b0",
+        "PRIMARY_DIM": "#10394f",
+        "SECONDARY": "#b5f5f5",
+        "SECONDARY_D": "#64baba",
+        "SECONDARY_DIM": "#204747",
+        "TEXT": "#e8f8ff",
+        "TEXT_DIM": "#8ba9b8",
+        "GOOD": "#54e6a5",
+        "DANGER": "#ff5364",
+    },
+
+    "OBSIDIAN ROSE": {
+        "BG": "#10070d",
+        "BG_PANEL": "#1b0d17",
+        "BG_PANEL2": "#281321",
+        "PRIMARY": "#ff5c9a",
+        "PRIMARY_L": "#ff9cbe",
+        "PRIMARY_D": "#bf356b",
+        "PRIMARY_DIM": "#542039",
+        "SECONDARY": "#d6a5ff",
+        "SECONDARY_D": "#9465ba",
+        "SECONDARY_DIM": "#3d2852",
+        "TEXT": "#fff0f6",
+        "TEXT_DIM": "#b49aa9",
+        "GOOD": "#65e6a5",
+        "DANGER": "#ff5968",
+    },
+
+    "COPPER DUSK": {
+        "BG": "#0d0907",
+        "BG_PANEL": "#19110d",
+        "BG_PANEL2": "#251914",
+        "PRIMARY": "#d98b52",
+        "PRIMARY_L": "#f2b47e",
+        "PRIMARY_D": "#995a31",
+        "PRIMARY_DIM": "#49301f",
+        "SECONDARY": "#8fc7b0",
+        "SECONDARY_D": "#568b75",
+        "SECONDARY_DIM": "#263f35",
+        "TEXT": "#f8eee5",
+        "TEXT_DIM": "#a99a8d",
+        "GOOD": "#74d6a2",
+        "DANGER": "#e65e58",
+    },
+
+    "EMERALD MATRIX": {
+        "BG": "#030a07",
+        "BG_PANEL": "#07140d",
+        "BG_PANEL2": "#0b1d12",
+        "PRIMARY": "#00e676",
+        "PRIMARY_L": "#73ffb2",
+        "PRIMARY_D": "#00994e",
+        "PRIMARY_DIM": "#0b3d26",
+        "SECONDARY": "#c6ff5e",
+        "SECONDARY_D": "#83ad2c",
+        "SECONDARY_DIM": "#354516",
+        "TEXT": "#e8ffef",
+        "TEXT_DIM": "#83a892",
+        "GOOD": "#58f59b",
+        "DANGER": "#ff5964",
+    },
+
+    "SOLAR FLARE": {
+        "BG": "#0b0710",
+        "BG_PANEL": "#160c18",
+        "BG_PANEL2": "#211126",
+        "PRIMARY": "#ffb000",
+        "PRIMARY_L": "#ffd166",
+        "PRIMARY_D": "#bf7000",
+        "PRIMARY_DIM": "#4a2b0a",
+        "SECONDARY": "#ff4d6d",
+        "SECONDARY_D": "#ba2948",
+        "SECONDARY_DIM": "#4a1424",
+        "TEXT": "#fff1e8",
+        "TEXT_DIM": "#b49aa5",
+        "GOOD": "#65e6a5",
+        "DANGER": "#ff5263",
     },
 }
 
@@ -205,15 +482,6 @@ if _THEME_NAME == "CUSTOM":
         apply_theme_globals(custom)
 else:
     apply_theme_globals(THEMES.get(_THEME_NAME, THEMES["ULTRON CLASSIC"]))
-
-
-def run_cmd(cmd):
-    try:
-        return subprocess.check_output(
-            cmd, shell=True, text=True, stderr=subprocess.DEVNULL
-        ).strip()
-    except Exception:
-        return "No disponible"
 
 
 class UltronCore:
@@ -511,15 +779,635 @@ class UltronCore:
 
 
 # ============================================================
-# AUTENTICACIÃ“N LOCAL ULTRON
+# AUTENTICACIÓN LOCAL ULTRON
 # ============================================================
 AUTH_DIR = os.path.join(os.path.expanduser("~"), ".ultron")
 AUTH_DB = os.path.join(AUTH_DIR, "users.db")
 SESSION_FILE = os.path.join(AUTH_DIR, "session.json")
+GROQ_KEYS_FILE = os.path.join(AUTH_DIR, "groq_keys.json")
+GROQ_KEY_URL = "https://console.groq.com/keys"
+GROQ_KEYRING_SERVICE = "ULTRON Panel / Groq API"
+
+
+def _secure_keyring():
+    """Return only supported OS credential stores, never a plaintext backend."""
+    try:
+        import keyring
+
+        backend = keyring.get_keyring()
+        backend_name = type(backend).__module__.casefold()
+        is_supported = (
+            os.name == "nt" and "windows" in backend_name
+        ) or (
+            os.name != "nt"
+            and ("secretservice" in backend_name or "kwallet" in backend_name)
+        )
+        return keyring if is_supported and getattr(backend, "priority", 0) > 0 else None
+    except Exception:
+        return None
+
+
+def _windows_dpapi(data, decrypt=False):
+    """Protect data for the current Windows account using DPAPI."""
+    if os.name != "nt":
+        raise RuntimeError("DPAPI solo está disponible en Windows.")
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [
+            ("cbData", wintypes.DWORD),
+            ("pbData", ctypes.POINTER(ctypes.c_ubyte)),
+        ]
+
+    source_buffer = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
+    source = DataBlob(
+        len(data), ctypes.cast(source_buffer, ctypes.POINTER(ctypes.c_ubyte))
+    )
+    result = DataBlob()
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if decrypt:
+        description = wintypes.LPWSTR()
+        function = crypt32.CryptUnprotectData
+        function.argtypes = [
+            ctypes.POINTER(DataBlob), ctypes.POINTER(wintypes.LPWSTR),
+            ctypes.POINTER(DataBlob), ctypes.c_void_p, ctypes.c_void_p,
+            wintypes.DWORD, ctypes.POINTER(DataBlob),
+        ]
+        succeeded = function(
+            ctypes.byref(source), ctypes.byref(description), None,
+            None, None, 0x1, ctypes.byref(result),
+        )
+    else:
+        function = crypt32.CryptProtectData
+        function.argtypes = [
+            ctypes.POINTER(DataBlob), wintypes.LPCWSTR, ctypes.POINTER(DataBlob),
+            ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(DataBlob),
+        ]
+        succeeded = function(
+            ctypes.byref(source), "ULTRON Groq API key", None,
+            None, None, 0x1, ctypes.byref(result),
+        )
+    if not succeeded:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    try:
+        return ctypes.string_at(result.pbData, result.cbData)
+    finally:
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        kernel32.LocalFree(ctypes.cast(result.pbData, ctypes.c_void_p))
+        if decrypt and description:
+            kernel32.LocalFree(ctypes.cast(description, ctypes.c_void_p))
+
+
+def _read_legacy_groq_keys():
+    try:
+        if os.name != "nt":
+            os.chmod(AUTH_DIR, 0o700)
+            if os.path.exists(GROQ_KEYS_FILE):
+                os.chmod(GROQ_KEYS_FILE, 0o600)
+        with open(GROQ_KEYS_FILE, "r", encoding="utf-8") as key_file:
+            keys = json.load(key_file)
+        if not isinstance(keys, dict):
+            return {}
+        for account, stored in list(keys.items()):
+            if isinstance(stored, dict) and isinstance(stored.get("dpapi"), str):
+                encrypted = base64.b64decode(stored["dpapi"], validate=True)
+                keys[account] = _windows_dpapi(encrypted, decrypt=True).decode("utf-8")
+            elif isinstance(stored, dict):
+                keys.pop(account, None)
+        return keys
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _write_legacy_groq_keys(keys):
+    if not keys:
+        try:
+            os.remove(GROQ_KEYS_FILE)
+        except FileNotFoundError:
+            pass
+        return
+    os.makedirs(AUTH_DIR, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(AUTH_DIR, 0o700)
+    except OSError:
+        pass
+    temporary_file = GROQ_KEYS_FILE + "." + uuid.uuid4().hex + ".tmp"
+    stored_keys = {
+        account: (
+            {"dpapi": base64.b64encode(
+                _windows_dpapi(value.encode("utf-8"))
+            ).decode("ascii")}
+            if os.name == "nt" and isinstance(value, str)
+            else value
+        )
+        for account, value in keys.items()
+    }
+    descriptor = os.open(
+        temporary_file,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as key_file:
+        json.dump(stored_keys, key_file, indent=2)
+    os.replace(temporary_file, GROQ_KEYS_FILE)
+
+
+def _load_groq_key(username):
+    account = username.casefold()
+    keyring = _secure_keyring()
+    if keyring:
+        try:
+            value = keyring.get_password(GROQ_KEYRING_SERVICE, account)
+            if value:
+                return value
+        except Exception:
+            pass
+
+    # Import keys saved by older versions, then migrate and erase each plaintext
+    # entry as soon as the OS credential manager accepts it.
+    keys = _read_legacy_groq_keys()
+    value = keys.get(account, "")
+    if value and keyring:
+        try:
+            keyring.set_password(GROQ_KEYRING_SERVICE, account, value)
+            keys.pop(account, None)
+            _write_legacy_groq_keys(keys)
+        except Exception:
+            if os.name == "nt":
+                try:
+                    _write_legacy_groq_keys(keys)
+                except Exception:
+                    pass
+    elif value and os.name == "nt":
+        try:
+            _write_legacy_groq_keys(keys)
+        except Exception:
+            pass
+    return value
+
+
+def _save_groq_key(username, api_key):
+    account = username.casefold()
+    keyring = _secure_keyring()
+    if keyring:
+        try:
+            keyring.set_password(GROQ_KEYRING_SERVICE, account, api_key)
+        except Exception:
+            pass
+        else:
+            keys = _read_legacy_groq_keys()
+            if account in keys:
+                keys.pop(account, None)
+                try:
+                    _write_legacy_groq_keys(keys)
+                except OSError:
+                    pass
+            return "almacén seguro del sistema"
+
+    # Keep desktops usable without a keyring: Windows uses per-account DPAPI;
+    # Linux uses a private 0600 file when Secret Service/KWallet is absent.
+    keys = _read_legacy_groq_keys()
+    keys[account] = api_key
+    _write_legacy_groq_keys(keys)
+    if os.name == "nt":
+        return "archivo local cifrado con DPAPI para tu cuenta de Windows"
+    return "archivo local con permisos restringidos (sin almacén seguro disponible)"
+
+
+def _delete_groq_key(username):
+    account = username.casefold()
+    keyring = _secure_keyring()
+    keyring_read_error = None
+    if keyring:
+        try:
+            stored = keyring.get_password(GROQ_KEYRING_SERVICE, account)
+        except Exception as exc:
+            keyring_read_error = exc
+            stored = None
+        if stored:
+            try:
+                keyring.delete_password(GROQ_KEYRING_SERVICE, account)
+            except Exception as exc:
+                raise RuntimeError(
+                    "No se pudo borrar la clave del almacén del sistema."
+                ) from exc
+    keys = _read_legacy_groq_keys()
+    if keyring_read_error and account not in keys:
+        raise RuntimeError(
+            "No se pudo comprobar la clave en el almacén del sistema."
+        ) from keyring_read_error
+    if account in keys:
+        keys.pop(account, None)
+        _write_legacy_groq_keys(keys)
+
+
+def _normalize_groq_api_key(value):
+    """Acepta la clave sola o pegada desde una variable/comando común."""
+    api_key = str(value or "").strip()
+    if api_key.casefold().startswith("authorization:"):
+        api_key = api_key.split(":", 1)[1].strip()
+    if api_key.casefold().startswith("bearer "):
+        api_key = api_key[7:].strip()
+    if api_key.casefold().startswith("groq_api_key="):
+        api_key = api_key.split("=", 1)[1].strip()
+    api_key = api_key.strip().strip("\"'")
+    # Las API keys no contienen espacios; elimina saltos de línea introducidos
+    # al copiar desde una terminal o un documento.
+    return "".join(api_key.split())
+
+
+def _validate_groq_api_key(api_key, timeout=6):
+    request = urllib.request.Request(
+        "https://api.groq.com/openai/v1/models",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            # Avoid urllib's default Python-urllib signature, which Groq's
+            # edge protection may block before it can validate credentials.
+            "User-Agent": "ULTRON-Core/3.0",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+            return "valid", "Clave validada con Groq."
+        return "unverified", "Groq respondió en un formato inesperado."
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return "invalid", "Groq rechazó la clave. Revisa que esté completa y activa."
+        if exc.code == 403:
+            try:
+                error_body = exc.read(2048).decode("utf-8", errors="replace")
+                error_data = json.loads(error_body)
+            except (OSError, ValueError, UnicodeDecodeError):
+                error_data = {}
+            if error_data.get("error_code") == 1010:
+                return (
+                    "unverified",
+                    "Cloudflare bloqueó la comprobación de ULTRON (error 1010); "
+                    "esto no significa que tu clave sea inválida. La guardaré y "
+                    "ULTRON la comprobará al conectar con Groq.",
+                )
+            return (
+                "unverified",
+                "Groq no autorizó la comprobación (HTTP 403); no se pudo "
+                "confirmar si la clave es válida.",
+            )
+        if exc.code == 429:
+            return "unverified", "Groq limitó la comprobación. Espera un momento y reintenta."
+        return "unverified", f"Groq respondió con HTTP {exc.code}."
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, TimeoutError):
+            return "unverified", "Se agotó el tiempo al conectar con Groq."
+        return "unverified", "No se pudo conectar con Groq. Revisa tu conexión e inténtalo otra vez."
+    except (ValueError, UnicodeDecodeError):
+        return "unverified", "Groq respondió con datos que no se pudieron leer."
+
+
+def _format_recovery_code(code):
+    return " ".join(code[index:index + 4] for index in range(0, len(code), 4))
+
+
+def _show_recovery_code(parent, username, code):
+    dialog = tk.Toplevel(parent)
+    dialog.title("ULTRON // CÓDIGO DE RECUPERACIÓN")
+    dialog.configure(bg=BG)
+    dialog.resizable(False, False)
+    dialog.transient(parent)
+    dialog.grab_set()
+    dialog.geometry("500x290")
+
+    body = tk.Frame(dialog, bg=BG)
+    body.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+    tk.Label(
+        body,
+        text="GUARDA TU CÓDIGO DE RECUPERACIÓN",
+        fg=ORANGE,
+        bg=BG,
+        font=("Segoe UI", 13, "bold"),
+    ).pack(anchor="w")
+    tk.Label(
+        body,
+        text=(
+            f"Este código permite restablecer la contraseña de {username}. "
+            "Solo se mostrará ahora. Guárdalo en un lugar seguro."
+        ),
+        fg=TEXT,
+        bg=BG,
+        font=("Segoe UI", 9),
+        wraplength=450,
+        justify="left",
+    ).pack(anchor="w", pady=(9, 14))
+
+    code_var = tk.StringVar(value=_format_recovery_code(code))
+    code_entry = tk.Entry(
+        body,
+        textvariable=code_var,
+        state="readonly",
+        justify="center",
+        bg=BG_PANEL2,
+        fg=TURQUOISE,
+        readonlybackground=BG_PANEL2,
+        relief=tk.FLAT,
+        font=("Consolas", 14, "bold"),
+    )
+    code_entry.pack(fill=tk.X, ipady=10)
+
+    status = tk.Label(body, text="", fg=TURQUOISE, bg=BG,
+                      font=("Segoe UI", 9))
+    status.pack(anchor="w", pady=(7, 0))
+
+    buttons = tk.Frame(body, bg=BG)
+    buttons.pack(fill=tk.X, side=tk.BOTTOM)
+
+    def copy_code():
+        dialog.clipboard_clear()
+        dialog.clipboard_append(code)
+        status.configure(text="Código copiado al portapapeles.")
+
+    def close_dialog():
+        try:
+            dialog.grab_release()
+        except tk.TclError:
+            pass
+        dialog.destroy()
+
+    tk.Button(
+        buttons, text="COPIAR CÓDIGO", command=copy_code,
+        fg=BG, bg=TURQUOISE, activebackground=TURQUOISE_D,
+        relief=tk.FLAT, font=("Segoe UI", 9, "bold"), padx=12, pady=8,
+    ).pack(side=tk.LEFT)
+    tk.Button(
+        buttons, text="CONTINUAR", command=close_dialog,
+        fg=BG, bg=ORANGE, activebackground=ORANGE_L,
+        relief=tk.FLAT, font=("Segoe UI", 9, "bold"), padx=12, pady=8,
+    ).pack(side=tk.RIGHT)
+
+    dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+    dialog.wait_window()
+
+
+def _list_registered_users():
+    if not os.path.exists(AUTH_DB):
+        return []
+    try:
+        with sqlite3.connect(AUTH_DB) as db:
+            rows = db.execute(
+                "SELECT username FROM users ORDER BY username COLLATE NOCASE"
+            ).fetchall()
+        return [row[0] for row in rows]
+    except sqlite3.Error:
+        return []
+
+
+def _delete_registered_user(username):
+    # Remove secrets first. If the OS credential manager is unavailable, keep
+    # the account intact instead of orphaning a Groq key under its username.
+    _delete_groq_key(username)
+    with sqlite3.connect(AUTH_DB) as db:
+        db.execute(
+            "DELETE FROM users WHERE username = ? COLLATE NOCASE",
+            (username,),
+        )
+
+    try:
+        with open(SESSION_FILE, "r", encoding="utf-8") as session_file:
+            session = json.load(session_file)
+        if session.get("username", "").casefold() == username.casefold():
+            os.remove(SESSION_FILE)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+class UltronUserPicker:
+    """Selector de cuentas que abre el inicio de sesión o el registro."""
+
+    def __init__(self, root, active_username=""):
+        self.action = None
+        self.username = None
+        self.active_username = active_username.casefold()
+        self.deleted_active_user = False
+        self.win = tk.Toplevel(root)
+        self.win.title("ULTRON // USUARIOS")
+        self.win.configure(bg=BG)
+        self.win.resizable(False, False)
+        self.win.transient(root)
+
+        width, height = 470, 510
+        screen_w = self.win.winfo_screenwidth()
+        screen_h = self.win.winfo_screenheight()
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 2)
+        self.win.geometry(f"{width}x{height}+{x}+{y}")
+
+        content = tk.Frame(self.win, bg=BG)
+        content.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+        tk.Label(
+            content,
+            text="¿QUIÉN VA A USAR ULTRON?",
+            fg=ORANGE,
+            bg=BG,
+            font=("Segoe UI", 15, "bold"),
+        ).pack(anchor="w", pady=(0, 12))
+
+        list_shell = tk.Frame(
+            content, bg=BG_PANEL, highlightthickness=1,
+            highlightbackground=GRAY2,
+        )
+        list_shell.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(
+            list_shell, bg=BG_PANEL, highlightthickness=0,
+        )
+        scrollbar = tk.Scrollbar(
+            list_shell, orient=tk.VERTICAL, command=canvas.yview,
+        )
+        users_frame = tk.Frame(canvas, bg=BG_PANEL)
+        self.users_frame = users_frame
+        self.user_rows = {}
+        self.empty_users_label = None
+        users_frame.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.create_window((0, 0), window=users_frame, anchor="nw", tags="users")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=8)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 5), pady=8)
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure("users", width=event.width),
+        )
+
+        users = _list_registered_users()
+        if not users:
+            self.empty_users_label = tk.Label(
+                users_frame,
+                text="Todavía no hay usuarios. Crea una cuenta para empezar.",
+                fg=TEXT_DIM,
+                bg=BG_PANEL,
+                font=("Segoe UI", 10),
+                wraplength=365,
+                justify="left",
+            )
+            self.empty_users_label.pack(anchor="w", padx=12, pady=14)
+
+        for username in users:
+            row = tk.Frame(
+                users_frame, bg=BG_PANEL2, cursor="hand2",
+                highlightthickness=1, highlightbackground=GRAY,
+            )
+            row.pack(fill=tk.X, padx=6, pady=4)
+            self.user_rows[username.casefold()] = row
+            avatar = tk.Canvas(
+                row, width=40, height=40, bg=BG_PANEL2,
+                highlightthickness=0, cursor="hand2",
+            )
+            avatar.pack(side=tk.LEFT, padx=(10, 8), pady=6)
+            avatar.create_oval(3, 3, 37, 37, fill=ORANGE_DIM, outline=ORANGE_D)
+            avatar.create_oval(15, 9, 25, 19, fill=ORANGE, outline=ORANGE)
+            avatar.create_arc(
+                10, 17, 30, 34, start=0, extent=180,
+                style=tk.PIESLICE, fill=ORANGE, outline=ORANGE,
+            )
+            label = tk.Label(
+                row, text=username, fg=TEXT, bg=BG_PANEL2,
+                font=("Segoe UI", 11, "bold"), anchor="w", cursor="hand2",
+            )
+            label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=10)
+            arrow = tk.Label(
+                row, text="›", fg=TURQUOISE, bg=BG_PANEL2,
+                font=("Segoe UI", 20), cursor="hand2",
+            )
+            arrow.pack(side=tk.RIGHT, padx=12)
+
+            remove_btn = tk.Button(
+                row,
+                text="×",
+                command=lambda name=username: self._confirm_delete(name),
+                fg=RED,
+                bg=BG_PANEL2,
+                activeforeground=BG,
+                activebackground=RED,
+                relief=tk.FLAT,
+                font=("Segoe UI", 15, "bold"),
+                width=3,
+                cursor="hand2",
+            )
+            remove_btn.pack(side=tk.RIGHT, padx=(0, 8), pady=5)
+
+            def choose(_event=None, selected=username):
+                self.username = selected
+                self.action = "login"
+                self.win.destroy()
+
+            for widget in (row, avatar, label, arrow):
+                widget.bind("<Button-1>", choose)
+                widget.bind(
+                    "<Enter>",
+                    lambda _event, frame=row: frame.configure(bg=GRAY),
+                )
+                widget.bind(
+                    "<Leave>",
+                    lambda _event, frame=row: frame.configure(bg=BG_PANEL2),
+                )
+
+        buttons = tk.Frame(content, bg=BG)
+        buttons.pack(fill=tk.X, pady=(14, 0))
+
+        def choose_action(action):
+            self.action = action
+            self.win.destroy()
+
+        tk.Button(
+            buttons,
+            text="INICIAR SESIÓN",
+            command=lambda: choose_action("login"),
+            fg=BG,
+            bg=TURQUOISE,
+            activebackground=TURQUOISE_D,
+            relief=tk.FLAT,
+            font=("Segoe UI", 9, "bold"),
+            padx=12,
+            pady=9,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        tk.Button(
+            buttons,
+            text="CREAR USUARIO",
+            command=lambda: choose_action("register"),
+            fg=BG,
+            bg=ORANGE,
+            activebackground=ORANGE_L,
+            relief=tk.FLAT,
+            font=("Segoe UI", 9, "bold"),
+            padx=12,
+            pady=9,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+
+        self.win.protocol("WM_DELETE_WINDOW", self.win.destroy)
+        self.win.grab_set()
+        self.win.focus_force()
+
+    def _confirm_delete(self, username):
+        from tkinter import messagebox
+
+        confirmed = messagebox.askyesno(
+            "ULTRON // ELIMINAR USUARIO",
+            (
+                f"¿Eliminar completamente el usuario «{username}»?\n\n"
+                "Se borrarán su cuenta local, su API key de Groq y su sesión "
+                "recordada. Esta acción no se puede deshacer."
+                + (
+                    "\n\nEs la cuenta activa. ULTRON se cerrará al eliminarla."
+                    if username.casefold() == self.active_username else ""
+                )
+            ),
+            icon="warning",
+            parent=self.win,
+        )
+        if not confirmed:
+            return
+
+        try:
+            _delete_registered_user(username)
+        except Exception as exc:
+            messagebox.showerror(
+                "ULTRON // ERROR",
+                f"No se pudo eliminar el usuario:\n{exc}",
+                parent=self.win,
+            )
+            return
+
+        if username.casefold() == self.active_username:
+            self.deleted_active_user = True
+            # No permitir que el panel siga abierto con una cuenta ya borrada.
+            self.win.destroy()
+            return
+
+        row = self.user_rows.pop(username.casefold(), None)
+        if row is not None:
+            row.destroy()
+        if not self.user_rows:
+            if self.empty_users_label is None:
+                self.empty_users_label = tk.Label(
+                    self.users_frame,
+                    text="Todavía no hay usuarios. Crea una cuenta para empezar.",
+                    fg=TEXT_DIM,
+                    bg=BG_PANEL,
+                    font=("Segoe UI", 10),
+                    wraplength=365,
+                    justify="left",
+                )
+                self.empty_users_label.pack(anchor="w", padx=12, pady=14)
 
 
 class UltronAuth:
-    def __init__(self, root):
+    def __init__(self, root, initial_mode="login", initial_username=""):
         self.root = root
         self.system = create_bridge()
         self.authenticated = False
@@ -554,6 +1442,12 @@ class UltronAuth:
         if "session_hash" not in columns:
             self.db.execute("ALTER TABLE users ADD COLUMN session_hash BLOB")
             self.db.commit()
+            columns.add("session_hash")
+        if "recovery_salt" not in columns:
+            self.db.execute("ALTER TABLE users ADD COLUMN recovery_salt BLOB")
+        if "recovery_hash" not in columns:
+            self.db.execute("ALTER TABLE users ADD COLUMN recovery_hash BLOB")
+        self.db.commit()
 
         self.win = tk.Toplevel(root)
         self.win.title("ULTRON // ACCESS")
@@ -572,11 +1466,13 @@ class UltronAuth:
         self.win.resizable(False, False)
         self.win.protocol("WM_DELETE_WINDOW", self._cancel)
 
-        self.mode = tk.StringVar(value="login")
+        self.mode = tk.StringVar(value=initial_mode)
+        self.registered_username = None
         self.user_var = tk.StringVar()
         self.pass_var = tk.StringVar()
         self.pass2_var = tk.StringVar()
         self.status_var = tk.StringVar(value="")
+        self.user_var.set(initial_username)
 
         self._build()
 
@@ -603,29 +1499,35 @@ class UltronAuth:
         mode_row = tk.Frame(body, bg=BG)
         mode_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
 
-        tk.Button(
+        self.login_mode_btn = tk.Button(
             mode_row,
-            text="INICIAR SESIÃ“N",
+            text="INICIAR SESIÓN",
             command=lambda: self._set_mode("login"),
             fg=TURQUOISE,
             bg=BG_PANEL2,
-            activebackground=GRAY,
+            activeforeground=BG,
+            activebackground=TURQUOISE,
             relief=tk.FLAT,
+            font=("Segoe UI", 9, "bold"),
             padx=11,
             pady=7
-        ).pack(side=tk.LEFT, padx=(0, 8))
+        )
+        self.login_mode_btn.pack(side=tk.LEFT, padx=(0, 8), fill=tk.X, expand=True)
 
-        tk.Button(
+        self.register_mode_btn = tk.Button(
             mode_row,
             text="CREAR USUARIO",
             command=lambda: self._set_mode("register"),
             fg=ORANGE,
             bg=BG_PANEL2,
-            activebackground=GRAY,
+            activeforeground=BG,
+            activebackground=ORANGE,
             relief=tk.FLAT,
+            font=("Segoe UI", 9, "bold"),
             padx=11,
             pady=7
-        ).pack(side=tk.LEFT)
+        )
+        self.register_mode_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # Usuario.
         tk.Label(
@@ -653,7 +1555,7 @@ class UltronAuth:
         # Contraseña.
         tk.Label(
             body,
-            text="CONTRASEÃ‘A",
+            text="CONTRASEÑA",
             fg=TEXT_DIM,
             bg=BG,
             font=("Segoe UI", 9)
@@ -677,7 +1579,7 @@ class UltronAuth:
         # Confirmación: justo debajo de contraseña.
         self.confirm_label = tk.Label(
             body,
-            text="CONFIRMAR CONTRASEÃ‘A",
+            text="CONFIRMAR CONTRASEÑA",
             fg=TEXT_DIM,
             bg=BG,
             font=("Segoe UI", 9)
@@ -776,9 +1678,37 @@ class UltronAuth:
             pady=9
         )
         self.action_btn.grid(
-            row=8, column=0, columnspan=2,
+            row=8, column=0,
             sticky="ew", pady=(5, 8)
         )
+
+        self.recovery_btn = tk.Button(
+            body,
+            text="RECUPERAR ACCESO",
+            command=self._open_password_recovery,
+            fg=TURQUOISE,
+            bg=BG_PANEL2,
+            activebackground=GRAY,
+            relief=tk.FLAT,
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=9,
+        )
+        self.recovery_btn.grid(row=8, column=1, sticky="ew", pady=(5, 8))
+
+        self.show_recovery_btn = tk.Button(
+            body,
+            text="VER CÓDIGO GUARDADO",
+            command=self._show_saved_recovery_code,
+            fg=ORANGE,
+            bg=BG_PANEL2,
+            activebackground=GRAY,
+            relief=tk.FLAT,
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=7,
+        )
+        self.show_recovery_btn.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(0, 5))
 
         self.status_label = tk.Label(
             body,
@@ -790,7 +1720,7 @@ class UltronAuth:
             justify="left"
         )
         self.status_label.grid(
-            row=9, column=0, columnspan=2,
+            row=10, column=0, columnspan=2,
             sticky="w", pady=(3, 0)
         )
 
@@ -801,7 +1731,7 @@ class UltronAuth:
         self.pass_entry.bind("<Return>", lambda _e: self._submit())
         self.confirm_entry.bind("<Return>", lambda _e: self._submit())
 
-        self._set_mode("login")
+        self._set_mode(self.mode.get())
         self.user_entry.focus_set()
 
     def _set_mode(self, mode):
@@ -811,10 +1741,47 @@ class UltronAuth:
         self.pass2_var.set("")
 
         if mode == "register":
+            self.login_mode_btn.configure(
+                fg=TURQUOISE,
+                bg=BG_PANEL2,
+                relief=tk.FLAT,
+                highlightthickness=0,
+            )
+            self.register_mode_btn.configure(
+                fg=BG,
+                bg=ORANGE,
+                relief=tk.SOLID,
+                highlightbackground=ORANGE_L,
+                highlightcolor=ORANGE_L,
+                highlightthickness=1,
+            )
+        else:
+            self.login_mode_btn.configure(
+                fg=BG,
+                bg=TURQUOISE,
+                relief=tk.SOLID,
+                highlightbackground=TURQUOISE,
+                highlightcolor=TURQUOISE,
+                highlightthickness=1,
+            )
+            self.register_mode_btn.configure(
+                fg=ORANGE,
+                bg=BG_PANEL2,
+                relief=tk.FLAT,
+                highlightthickness=0,
+            )
+
+        if mode == "register":
+            self.action_btn.grid_configure(column=0, columnspan=2)
+            self.recovery_btn.grid_remove()
+            self.show_recovery_btn.grid_remove()
             self.confirm_label.grid()
             self.confirm_entry.grid()
             self.action_btn.configure(text="[ CREAR USUARIO ]")
         else:
+            self.action_btn.grid_configure(column=0, columnspan=1)
+            self.recovery_btn.grid()
+            self.show_recovery_btn.grid()
             self.confirm_label.grid_remove()
             self.confirm_entry.grid_remove()
             self.action_btn.configure(text="[ ENTRAR ]")
@@ -828,6 +1795,193 @@ class UltronAuth:
             p=1,
             dklen=32
         )
+
+    def _show_saved_recovery_code(self):
+        username = self.user_var.get().strip()
+        row = self.db.execute(
+            "SELECT recovery_salt, recovery_hash FROM users "
+            "WHERE username = ? COLLATE NOCASE",
+            (username,),
+        ).fetchone()
+        if not row:
+            self.status_var.set("Escribe el nombre de una cuenta existente.")
+            return
+        if not row[0] or not row[1]:
+            self.status_var.set(
+                "Esta cuenta no tiene código. Inicia sesión para generar uno nuevo."
+            )
+            return
+
+        confirm = tk.Toplevel(self.win)
+        confirm.title("ULTRON // VERIFICAR IDENTIDAD")
+        confirm.configure(bg=BG)
+        confirm.resizable(False, False)
+        confirm.transient(self.win)
+        confirm.grab_set()
+        confirm.geometry("410x190")
+        body = tk.Frame(confirm, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=20, pady=18)
+        tk.Label(
+            body, text=(
+                "El código original no se puede recuperar porque se guarda de "
+                "forma protegida. Confirma tu contraseña para generar uno nuevo; "
+                "el anterior dejará de funcionar."
+            ),
+            fg=TEXT, bg=BG, font=("Segoe UI", 10), wraplength=370,
+        ).pack(anchor="w", pady=(0, 10))
+        password_var = tk.StringVar()
+        password_entry = tk.Entry(
+            body, textvariable=password_var, show="•", bg=BG_PANEL2,
+            fg=TEXT, insertbackground=ORANGE, relief=tk.FLAT,
+        )
+        password_entry.pack(fill=tk.X, ipady=7)
+        status = tk.Label(body, text="", fg=RED, bg=BG, font=("Segoe UI", 9))
+        status.pack(anchor="w", pady=5)
+
+        def verify():
+            row = self.db.execute(
+                "SELECT salt, password_hash FROM users "
+                "WHERE username = ? COLLATE NOCASE",
+                (username,),
+            ).fetchone()
+            if not row or not secrets.compare_digest(
+                self._hash_password(password_var.get(), row[0]), row[1]
+            ):
+                status.configure(text="Contraseña incorrecta.")
+                return
+            new_code = secrets.token_hex(16).upper()
+            new_salt = secrets.token_bytes(16)
+            new_hash = self._hash_password(new_code, new_salt)
+            self.db.execute(
+                "UPDATE users SET recovery_salt = ?, recovery_hash = ? "
+                "WHERE username = ? COLLATE NOCASE",
+                (new_salt, new_hash, username),
+            )
+            self.db.commit()
+            confirm.grab_release()
+            confirm.destroy()
+            _show_recovery_code(self.win, username, new_code)
+
+        tk.Button(
+            body, text="CERRAR", command=confirm.destroy,
+            fg=TEXT, bg=BG_PANEL2, relief=tk.FLAT, padx=12, pady=7,
+        ).pack(side=tk.LEFT, pady=(8, 0))
+        tk.Button(
+            body, text="GENERAR NUEVO CÓDIGO", command=verify,
+            fg=BG, bg=ORANGE, relief=tk.FLAT, padx=12, pady=7,
+        ).pack(side=tk.RIGHT, pady=(8, 0))
+        password_entry.focus_set()
+
+    def _open_password_recovery(self):
+        dialog = tk.Toplevel(self.win)
+        dialog.title("ULTRON // RECUPERAR ACCESO")
+        dialog.configure(bg=BG)
+        dialog.resizable(False, False)
+        dialog.transient(self.win)
+        dialog.geometry("470x400")
+
+        body = tk.Frame(dialog, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+        tk.Label(
+            body, text="RESTABLECER CONTRASEÑA", fg=ORANGE, bg=BG,
+            font=("Segoe UI", 13, "bold"),
+        ).pack(anchor="w", pady=(0, 8))
+
+        username_var = tk.StringVar(value=self.user_var.get().strip())
+        code_var = tk.StringVar()
+        password_var = tk.StringVar()
+        confirm_var = tk.StringVar()
+        fields = (
+            ("USUARIO", username_var, ""),
+            ("CÓDIGO DE RECUPERACIÓN", code_var, ""),
+            ("NUEVA CONTRASEÑA", password_var, "•"),
+            ("CONFIRMAR CONTRASEÑA", confirm_var, "•"),
+        )
+        for label_text, variable, mask in fields:
+            tk.Label(
+                body, text=label_text, fg=TEXT_DIM, bg=BG,
+                font=("Segoe UI", 8, "bold"),
+            ).pack(anchor="w", pady=(7, 2))
+            tk.Entry(
+                body, textvariable=variable, show=mask, bg=BG_PANEL2,
+                fg=TEXT, insertbackground=ORANGE, relief=tk.FLAT,
+                font=("Consolas", 10),
+            ).pack(fill=tk.X, ipady=6)
+
+        status = tk.Label(
+            body, text="", fg=RED, bg=BG, font=("Segoe UI", 9),
+            wraplength=420, justify="left",
+        )
+        status.pack(anchor="w", pady=(8, 0))
+
+        def reset_password():
+            username = username_var.get().strip()
+            recovery_code = (
+                code_var.get().strip().replace(" ", "").replace("-", "").upper()
+            )
+            password = password_var.get()
+            if len(password) < 6:
+                status.configure(text="La contraseña debe tener al menos 6 caracteres.")
+                return
+            if password != confirm_var.get():
+                status.configure(text="Las contraseñas no coinciden.")
+                return
+
+            row = self.db.execute(
+                "SELECT recovery_salt, recovery_hash FROM users "
+                "WHERE username = ? COLLATE NOCASE",
+                (username,),
+            ).fetchone()
+            if not row or not row[0] or not row[1]:
+                status.configure(
+                    text=(
+                        "Esta cuenta aún no tiene código de recuperación. "
+                        "Si olvidaste la contraseña, elimina la cuenta y créala "
+                        "de nuevo desde este equipo."
+                    )
+                )
+                return
+
+            actual_code_hash = self._hash_password(recovery_code, row[0])
+            if not secrets.compare_digest(actual_code_hash, row[1]):
+                status.configure(text="Usuario o código de recuperación incorrectos.")
+                return
+
+            salt = secrets.token_bytes(16)
+            password_hash = self._hash_password(password, salt)
+            self.db.execute(
+                "UPDATE users SET salt = ?, password_hash = ?, session_hash = NULL "
+                "WHERE username = ? COLLATE NOCASE",
+                (salt, password_hash, username),
+            )
+            self.db.commit()
+            self._clear_saved_session_for(username)
+            self.user_var.set(username)
+            self.pass_var.set("")
+            self.pass2_var.set("")
+            self.status_var.set("Contraseña restablecida. Inicia sesión con la nueva.")
+            status.configure(text="Contraseña actualizada. Ya puedes iniciar sesión.", fg=TURQUOISE)
+            dialog.after(900, dialog.destroy)
+
+        tk.Button(
+            body, text="RESTABLECER CONTRASEÑA", command=reset_password,
+            fg=BG, bg=ORANGE, activebackground=ORANGE_L, relief=tk.FLAT,
+            font=("Segoe UI", 9, "bold"), padx=12, pady=8,
+        ).pack(fill=tk.X, side=tk.BOTTOM, pady=(10, 0))
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.grab_set()
+        dialog.focus_force()
+
+    @staticmethod
+    def _clear_saved_session_for(username):
+        try:
+            with open(SESSION_FILE, "r", encoding="utf-8") as session_file:
+                session = json.load(session_file)
+            if session.get("username", "").casefold() == username.casefold():
+                os.remove(SESSION_FILE)
+        except (OSError, ValueError, AttributeError):
+            pass
 
     def _username_exists(self, username):
         row = self.db.execute(
@@ -946,11 +2100,16 @@ class UltronAuth:
 
         salt = secrets.token_bytes(16)
         digest = self._hash_password(password, salt)
+        recovery_code = secrets.token_hex(16).upper()
+        recovery_salt = secrets.token_bytes(16)
+        recovery_hash = self._hash_password(recovery_code, recovery_salt)
 
         try:
             self.db.execute(
-                "INSERT INTO users (username, salt, password_hash) VALUES (?, ?, ?)",
-                (username, salt, digest)
+                "INSERT INTO users "
+                "(username, salt, password_hash, recovery_salt, recovery_hash) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (username, salt, digest, recovery_salt, recovery_hash)
             )
             self.db.commit()
         except sqlite3.IntegrityError:
@@ -961,15 +2120,199 @@ class UltronAuth:
             return
 
         self.status_var.set("Usuario creado. Ya puedes iniciar sesión.")
+        self.registered_username = username
         self._set_mode("login")
         self.user_var.set(username)
+        _show_recovery_code(self.win, username, recovery_code)
+        self._show_groq_key_setup(self.win, username)
+
+    @staticmethod
+    def _show_groq_key_setup(parent, username):
+        dialog = tk.Toplevel(parent)
+        dialog.title("ULTRON // CONFIGURAR GROQ")
+        dialog.configure(bg=BG)
+        dialog.resizable(False, False)
+        dialog.transient(parent)
+        dialog.grab_set()
+
+        width, height = 510, 340
+        screen_w = dialog.winfo_screenwidth()
+        screen_h = dialog.winfo_screenheight()
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 2)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+
+        content = tk.Frame(dialog, bg=BG)
+        content.pack(fill=tk.BOTH, expand=True, padx=24, pady=20)
+
+        tk.Label(
+            content,
+            text="CONFIGURA TU API KEY DE GROQ",
+            fg=ORANGE,
+            bg=BG,
+            font=("Segoe UI", 14, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            content,
+            text=(
+                f"La clave será para la cuenta {username} y se guardará "
+                "en el almacén de credenciales del sistema cuando esté "
+                "disponible. Puedes configurarla ahora o "
+                "hacerlo después."
+            ),
+            fg=TEXT,
+            bg=BG,
+            font=("Segoe UI", 10),
+            wraplength=450,
+            justify="left",
+        ).pack(anchor="w", pady=(10, 14))
+
+        def open_groq():
+            import webbrowser
+            webbrowser.open(GROQ_KEY_URL)
+
+        tk.Button(
+            content,
+            text="ABRIR GROQ PARA CREAR MI API KEY",
+            command=open_groq,
+            fg=BG,
+            bg=TURQUOISE,
+            activeforeground=BG,
+            activebackground=TURQUOISE_D,
+            relief=tk.FLAT,
+            font=("Segoe UI", 9, "bold"),
+            padx=12,
+            pady=8,
+        ).pack(anchor="w", pady=(0, 14))
+
+        tk.Label(
+            content,
+            text="API KEY DE GROQ",
+            fg=TEXT_DIM,
+            bg=BG,
+            font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w")
+        key_var = tk.StringVar()
+        key_entry = tk.Entry(
+            content,
+            textvariable=key_var,
+            show="•",
+            bg=BG_PANEL2,
+            fg=TEXT,
+            insertbackground=ORANGE,
+            relief=tk.FLAT,
+            font=("Consolas", 10),
+        )
+        key_entry.pack(fill=tk.X, pady=(5, 8), ipady=8)
+
+        status = tk.Label(
+            content, text="", fg=RED, bg=BG,
+            font=("Segoe UI", 9), wraplength=450, justify="left",
+        )
+        status.pack(anchor="w")
+
+        buttons = tk.Frame(content, bg=BG)
+        buttons.pack(fill=tk.X, side=tk.BOTTOM, pady=(12, 0))
+
+        saved = {"value": False}
+        storage_info = {"value": ""}
+
+        def finish():
+            try:
+                dialog.grab_release()
+            except tk.TclError:
+                pass
+            dialog.destroy()
+
+        def save_key():
+            api_key = _normalize_groq_api_key(key_var.get())
+            if not api_key:
+                status.configure(text="Pega tu API key de Groq para guardarla.")
+                key_entry.focus_set()
+                return
+            key_var.set(api_key)
+
+            save_button.configure(state=tk.DISABLED)
+            status.configure(text="Comprobando la clave con Groq...", fg=TEXT_DIM)
+
+            def validate_and_save():
+                result, message = _validate_groq_api_key(api_key)
+                error = None
+                if result in ("valid", "unverified"):
+                    try:
+                        storage_info["value"] = _save_groq_key(username, api_key)
+                    except Exception as exc:
+                        error = f"No se pudo guardar la clave: {exc}"
+
+                def finish_validation():
+                    if not dialog.winfo_exists():
+                        return
+                    if result == "invalid":
+                        status.configure(text=message, fg=RED)
+                        save_button.configure(state=tk.NORMAL)
+                        return
+                    if error:
+                        status.configure(text=error, fg=RED)
+                        save_button.configure(state=tk.NORMAL)
+                        return
+                    saved["value"] = True
+                    if result == "valid":
+                        confirmation = (
+                            message + " Clave guardada en "
+                            + storage_info["value"] + "."
+                        )
+                    else:
+                        confirmation = (
+                            message + " Guardé la clave en "
+                            + storage_info["value"]
+                            + "; ULTRON volverá a comprobarla al usar Conciencia."
+                        )
+                    status.configure(text=confirmation, fg=TURQUOISE)
+                    dialog.after(800, finish)
+
+                try:
+                    dialog.after(0, finish_validation)
+                except tk.TclError:
+                    pass
+
+            threading.Thread(target=validate_and_save, daemon=True).start()
+
+        tk.Button(
+            buttons,
+            text="AHORA NO",
+            command=finish,
+            fg=TEXT,
+            bg=BG_PANEL2,
+            activebackground=GRAY,
+            relief=tk.FLAT,
+            padx=14,
+            pady=8,
+        ).pack(side=tk.LEFT)
+        save_button = tk.Button(
+            buttons,
+            text="GUARDAR API KEY",
+            command=save_key,
+            fg=BG,
+            bg=ORANGE,
+            activebackground=ORANGE_L,
+            relief=tk.FLAT,
+            font=("Segoe UI", 9, "bold"),
+            padx=14,
+            pady=8,
+        )
+        save_button.pack(side=tk.RIGHT)
+
+        dialog.protocol("WM_DELETE_WINDOW", finish)
+        dialog.wait_window()
+        return saved["value"]
 
     def _login(self):
         username = self.user_var.get().strip()
         password = self.pass_var.get()
 
         row = self.db.execute(
-            "SELECT username, salt, password_hash FROM users "
+            "SELECT username, salt, password_hash, recovery_salt, recovery_hash "
+            "FROM users "
             "WHERE username = ? COLLATE NOCASE",
             (username,)
         ).fetchone()
@@ -979,7 +2322,7 @@ class UltronAuth:
             self.status_var.set("Usuario o contraseña incorrectos.")
             return
 
-        saved_username, salt, expected = row
+        saved_username, salt, expected, recovery_salt, recovery_hash = row
         actual = self._hash_password(password, salt)
 
         if not secrets.compare_digest(actual, expected):
@@ -987,8 +2330,23 @@ class UltronAuth:
             self.status_var.set("Usuario o contraseña incorrectos.")
             return
 
+        new_recovery_code = None
+        if not recovery_salt or not recovery_hash:
+            new_recovery_code = secrets.token_hex(16).upper()
+            recovery_salt = secrets.token_bytes(16)
+            recovery_hash = self._hash_password(new_recovery_code, recovery_salt)
+            self.db.execute(
+                "UPDATE users SET recovery_salt = ?, recovery_hash = ? "
+                "WHERE username = ? COLLATE NOCASE",
+                (recovery_salt, recovery_hash, saved_username),
+            )
+            self.db.commit()
+
         self.authenticated = True
         self.username = saved_username
+
+        if new_recovery_code:
+            _show_recovery_code(self.win, saved_username, new_recovery_code)
 
         if self.remember_var.get():
             self._save_session(saved_username)
@@ -1016,9 +2374,16 @@ class UltronAuth:
 class UltronGUI:
     def __init__(self, root, current_user=""):
         self.current_user = current_user
+        self.groq_api_key = _load_groq_key(current_user) if current_user else ""
         self.root = root
         self.system = create_bridge()
-        self.root.title(f"ULTRON // CORE â€” {self.system.os_name()}")
+        self.feature_config = _load_feature_config()
+        self._latest_health_metrics = {}
+        self._active_alerts = {}
+        self._cpu_high_since = None
+        self._last_network_snapshot = None
+        self._network_no_reply_count = 0
+        self.root.title(f"ULTRON // CORE — {self.system.os_name()}")
         self.root.configure(bg=BG)
 
         # Ajuste automático al tamaño real de la pantalla.
@@ -1043,6 +2408,7 @@ class UltronGUI:
             "<Escape>",
             lambda _e: self.root.attributes("-fullscreen", False)
         )
+        self.root.bind("<F8>", self._on_mic_hotkey)
 
         self.font_title = tkfont.Font(family="Segoe UI", size=14, weight="bold")
         self.font_label = tkfont.Font(family="Segoe UI", size=10)
@@ -1054,7 +2420,7 @@ class UltronGUI:
             {
                 "role": "system",
                 "content": (
-                    "Eres ULTRON, la conciencia integrada de un panel Linux llamado "
+                    "Eres ULTRON, la conciencia integrada de un panel Windows llamado "
                     "ULTRON CORE. Habla en español de forma natural, clara y concisa. "
                     "No digas que eres Groq ni que eres otro asistente. "
                     "Si no sabes algo, dilo. No inventes resultados del sistema. "
@@ -1098,6 +2464,7 @@ class UltronGUI:
         self.mic_authorized = False
         self.consciousness_generation += 1
         self.ai_busy = False
+        self._set_mic_indicator(False)
 
         try:
             self._stop_microphone_capture()
@@ -1112,23 +2479,41 @@ class UltronGUI:
         self._set_live_text("")
         self._set_consciousness_state(
             "IDLE",
-            "â- SYSTEM ONLINE",
+            "● SYSTEM ONLINE",
             TURQUOISE
         )
 
         previous_user = self.current_user
 
-        self.root.withdraw()
+        picker = UltronUserPicker(self.root, active_username=self.current_user)
+        self.root.wait_window(picker.win)
 
-        auth = UltronAuth(self.root)
+        if picker.action is None:
+            if picker.deleted_active_user:
+                self.root.destroy()
+                return
+            self.root.lift()
+            self.root.focus_force()
+            return
+
+        auth = UltronAuth(
+            self.root,
+            initial_mode=picker.action,
+            initial_username=picker.username or "",
+        )
         self.root.wait_window(auth.win)
 
         if not auth.authenticated:
             # Si cancela, vuelve al usuario anterior.
-            self.root.deiconify()
+            if picker.deleted_active_user:
+                self.root.destroy()
+                return
+            self.root.lift()
+            self.root.focus_force()
             return
 
         self.current_user = auth.username
+        self.groq_api_key = _load_groq_key(self.current_user)
 
         if hasattr(self, "user_label"):
             self.user_label.configure(
@@ -1140,7 +2525,7 @@ class UltronGUI:
             {
                 "role": "system",
                 "content": (
-                    "Eres ULTRON, la conciencia integrada de un panel Linux llamado "
+                    "Eres ULTRON, la conciencia integrada de un panel Windows llamado "
                     "ULTRON CORE. Habla en español de forma natural, clara y concisa. "
                     "No digas que eres Groq ni que eres otro asistente. "
                     "Si no sabes algo, dilo. No inventes resultados del sistema. "
@@ -1175,8 +2560,25 @@ class UltronGUI:
         tk.Label(top, text="ULTRON // CORE", font=self.font_title,
                  fg=ORANGE, bg=BG).pack(side=tk.LEFT, padx=8)
 
+        self.mic_button = tk.Button(
+            top,
+            text="MIC · F8",
+            command=self._activate_consciousness,
+            font=self.font_small,
+            fg=TEXT_DIM,
+            bg=BG_PANEL2,
+            activeforeground=BG,
+            activebackground=TURQUOISE,
+            relief=tk.FLAT,
+            bd=0,
+            cursor="hand2",
+            padx=10,
+            pady=5,
+        )
+        self.mic_button.pack(side=tk.LEFT, padx=(6, 0))
+
         self.status_label = tk.Label(
-            top, text="â- SYSTEM ONLINE",
+            top, text="● SYSTEM ONLINE",
             font=self.font_small, fg=TURQUOISE, bg=BG
         )
         self.status_label.pack(side=tk.RIGHT, padx=12)
@@ -1417,84 +2819,192 @@ class UltronGUI:
         header.pack_propagate(False)
         tk.Label(header, text="THREAT LEVEL", font=self.font_small,
                  fg=ORANGE, bg=BG_PANEL2).pack(side=tk.LEFT, padx=12, pady=8)
-        tk.Label(header, text="CONTROLLED", font=self.font_small,
-                 fg=TURQUOISE, bg=BG_PANEL2).pack(side=tk.RIGHT, padx=12, pady=8)
+        self.network_status_var = tk.StringVar(value="CONSULTANDO")
+        self.threat_status_var = tk.StringVar(value="CONTROLLED")
+        self.threat_status_label = tk.Label(
+            header, textvariable=self.threat_status_var,
+            font=self.font_small, fg=TURQUOISE, bg=BG_PANEL2
+        )
+        self.threat_status_label.pack(side=tk.RIGHT, padx=12, pady=8)
 
         self.map_canvas = tk.Canvas(
-            parent, bg="#080808", highlightthickness=0, height=280
+            parent, bg="#080808", highlightthickness=0, height=210
         )
         self.map_canvas.pack(fill=tk.X, padx=8, pady=8)
-        self.root.after(100, self._draw_map)
+        self._world_map_png = None
+        self._world_map_source = None
+        self._world_map_photo = None
+        self._world_map_color = None
+        self.map_canvas.bind("<Configure>", self._draw_map)
+        self.network_interfaces = []
+        self._network_refresh_inflight = False
+        self.root.after(100, self._refresh_network_radar)
 
         live = tk.Frame(parent, bg=BG_PANEL)
-        live.pack(fill=tk.X, padx=10, pady=4)
-        tk.Label(live, text="â- LIVE MONITORING", font=self.font_small,
-                 fg=TURQUOISE, bg=BG_PANEL).pack(side=tk.LEFT)
+        live.pack(fill=tk.X, padx=10, pady=(2, 4))
+        tk.Label(
+            live, text="LIVE MONITORING", font=self.font_small,
+            fg=TURQUOISE, bg=BG_PANEL
+        ).pack(anchor="w")
 
         proto = tk.Frame(parent, bg=BG_PANEL)
-        proto.pack(fill=tk.X, padx=10, pady=10)
-        tk.Label(proto, text="PROTOCOL STATUS", font=self.font_small,
-                 fg=TEXT_DIM, bg=BG_PANEL).pack(anchor="w")
-
+        proto.pack(fill=tk.X, padx=10, pady=(0, 4))
+        tk.Label(
+            proto, text="PROTOCOL STATUS", font=self.font_small,
+            fg=TEXT_DIM, bg=BG_PANEL
+        ).pack(anchor="w")
         status_row = tk.Frame(proto, bg=BG_PANEL)
-        status_row.pack(fill=tk.X, pady=6)
-
-        for name, color in [
-            ("SHIELD", GREEN), ("LOCK", TURQUOISE),
-            ("LINK", ORANGE), ("AUTH", GREEN), ("KEY", TURQUOISE)
-        ]:
-            lbl = tk.Label(
+        status_row.pack(fill=tk.X, pady=(5, 4))
+        for name, color in (
+            ("SHIELD", GREEN),
+            ("LOCK", TURQUOISE),
+            ("LINK", ORANGE),
+            ("AUTH", GREEN),
+            ("KEY", TURQUOISE),
+        ):
+            tk.Label(
                 status_row, text=name, font=self.font_small,
                 fg=color, bg=BG_PANEL2, padx=8, pady=3
-            )
-            lbl.pack(side=tk.LEFT, padx=3)
+            ).pack(side=tk.LEFT, padx=(0, 4))
 
-    def _draw_map(self):
+        self.network_details_var = tk.StringVar(value="")
+        tk.Label(
+            parent, textvariable=self.network_details_var,
+            font=self.font_mono, fg=TEXT, bg=BG_PANEL,
+            justify="left", anchor="w", wraplength=280
+        ).pack(fill=tk.X, padx=10, pady=(0, 8))
+
+        sensors = tk.Frame(parent, bg=BG_PANEL2)
+        sensors.pack(fill=tk.X, padx=10, pady=(0, 8))
+        self.battery_status_var = tk.StringVar(value="BATERÍA: consultando…")
+        self.cpu_temperature_var = tk.StringVar(value="CPU: N/A")
+        tk.Label(
+            sensors, textvariable=self.battery_status_var,
+            font=self.font_small, fg=GREEN, bg=BG_PANEL2,
+            anchor="w", justify="left", wraplength=280
+        ).pack(fill=tk.X, padx=8, pady=(6, 2))
+        tk.Label(
+            sensors, textvariable=self.cpu_temperature_var,
+            font=self.font_small, fg=TEXT, bg=BG_PANEL2,
+            anchor="w"
+        ).pack(fill=tk.X, padx=8, pady=(0, 6))
+
+    def _draw_map(self, _event=None):
         c = self.map_canvas
         c.delete("all")
-        h = c.winfo_height() or 270
+        if self._world_map_png is None:
+            map_path = Path(__file__).resolve().parent.parent / "assets" / "maps" / "worldmap_outline.png"
+            try:
+                self._world_map_png = map_path.read_bytes()
+            except OSError:
+                c.create_text(
+                    max(c.winfo_width(), 250) / 2,
+                    max(c.winfo_height(), 240) / 2,
+                    text="MAPA MUNDIAL NO DISPONIBLE",
+                    fill=TEXT_DIM,
+                    font=self.font_small,
+                )
+                return
+        if self._world_map_source is None or self._world_map_color != TURQUOISE:
+            try:
+                self._world_map_source = tk.PhotoImage(
+                    data=_tint_outline_png(self._world_map_png, TURQUOISE),
+                    format="png",
+                )
+                self._world_map_color = TURQUOISE
+            except tk.TclError:
+                c.create_text(
+                    max(c.winfo_width(), 250) / 2,
+                    max(c.winfo_height(), 240) / 2,
+                    text="NO SE PUDO MOSTRAR EL MAPA",
+                    fill=TEXT_DIM,
+                    font=self.font_small,
+                )
+                return
 
-        na   = [25,70, 55,55, 85,60, 95,85, 80,120, 60,135, 35,125, 20,100]
-        sa   = [50,145, 75,140, 85,170, 80,210, 60,230, 40,215, 35,180, 45,155]
-        eu   = [130,55, 155,50, 170,65, 165,90, 145,95, 125,80]
-        af   = [135,105, 165,100, 180,130, 175,175, 155,200, 130,190, 120,150, 130,120]
-        asia = [175,45, 230,35, 275,50, 285,80, 270,110, 240,120, 200,105, 180,75]
-        oc   = [240,145, 270,140, 280,160, 265,175, 245,170]
-
-        for poly in [na, sa, eu, af, asia, oc]:
-            c.create_polygon(poly, outline="#1f1f1f", fill="#0e0e0e", width=1)
-            c.create_polygon(poly, outline=TURQUOISE_DIM, fill="", width=1)
-
-        nodes = [
-            (50, 95), (60, 185), (145, 75), (150, 155),
-            (235, 70), (255, 155), (210, 95),
-        ]
-        connections = [
-            (0, 2), (0, 3), (1, 3), (2, 4), (2, 3),
-            (3, 5), (4, 5), (4, 6), (2, 6), (0, 4),
-        ]
-
-        for a, b in connections:
-            x1, y1 = nodes[a]
-            x2, y2 = nodes[b]
-            mx = (x1 + x2) / 2
-            my = (y1 + y2) / 2 - 22
-            points = []
-            for j in range(15):
-                t = j / 14
-                px = (1-t)**2 * x1 + 2*(1-t)*t * mx + t**2 * x2
-                py = (1-t)**2 * y1 + 2*(1-t)*t * my + t**2 * y2
-                points.extend([px, py])
-            c.create_line(*points, fill=ORANGE, width=1.6, smooth=True)
-
-        for x, y in nodes:
-            c.create_oval(x-5, y-5, x+5, y+5, fill=ORANGE, outline=ORANGE_L, width=1)
-            c.create_oval(x-2, y-2, x+2, y+2, fill=ORANGE_L, outline="")
-
-        c.create_text(
-            10, h - 14, text="GLOBAL LINKS    FIXED",
-            anchor="w", fill=TEXT_DIM, font=self.font_small
+        width = max(c.winfo_width(), 250)
+        height = max(c.winfo_height(), 240)
+        target_width = max(width - 4, 1)
+        target_height = max(height - 20, 1)
+        factor = max(
+            1,
+            math.ceil(self._world_map_source.width() / target_width),
+            math.ceil(self._world_map_source.height() / target_height),
         )
+        self._world_map_photo = self._world_map_source.subsample(factor, factor)
+        c.create_image(
+            width / 2,
+            height / 2,
+            image=self._world_map_photo,
+            anchor=tk.CENTER,
+        )
+        map_left = (width - self._world_map_photo.width()) / 2
+        map_top = (height - self._world_map_photo.height()) / 2
+        for border in MAJOR_COUNTRY_BORDERS:
+            coords = []
+            for longitude, latitude in border:
+                coords.extend((
+                    map_left + (longitude + 180) / 360 * self._world_map_photo.width(),
+                    map_top + (90 - latitude) / 180 * self._world_map_photo.height(),
+                ))
+            c.create_line(
+                *coords,
+                fill=TURQUOISE_D,
+                width=1.2,
+                dash=(3, 2),
+                smooth=True,
+            )
+
+    def _refresh_network_radar(self):
+        """Refresca IP, red Wi-Fi y ping sin bloquear la interfaz."""
+        if self._network_refresh_inflight:
+            return
+        self._network_refresh_inflight = True
+
+        def worker():
+            try:
+                snapshot = self.system.network_snapshot()
+            except Exception:
+                snapshot = {"interfaces": [], "wifi_name": "", "ping": "Sin respuesta"}
+
+            def show():
+                self._network_refresh_inflight = False
+                if not self.root.winfo_exists():
+                    return
+                interfaces = snapshot.get("interfaces", [])
+                self.network_interfaces = interfaces
+                self._last_network_snapshot = snapshot
+                ping_text = str(snapshot.get("ping") or "Sin respuesta")
+                if not interfaces or "sin respuesta" in ping_text.casefold():
+                    self._network_no_reply_count += 1
+                else:
+                    self._network_no_reply_count = 0
+                self.network_status_var.set("ACTIVE" if interfaces else "OFFLINE")
+                lines = [
+                    f"{item['type']}  ·  {item['ip']}"
+                    for item in interfaces[:4]
+                ]
+                if len(interfaces) > 4:
+                    lines.append(f"+ {len(interfaces) - 4} interfaces más")
+
+                wifi_name = snapshot.get("wifi_name", "").strip()
+                if wifi_name:
+                    lines.append(f"Red Wi-Fi: {wifi_name}")
+                elif any(item["type"] == "Cable" for item in interfaces):
+                    lines.append("Red Wi-Fi: No aplica (conexión por cable)")
+                else:
+                    lines.append("Red Wi-Fi: No disponible")
+                lines.append(f"Ping a internet: {snapshot.get('ping') or 'Sin respuesta'}")
+                self.network_details_var.set("\n".join(lines))
+                self._evaluate_health_alerts()
+                self.root.after(8000, self._refresh_network_radar)
+
+            try:
+                self.root.after(0, show)
+            except tk.TclError:
+                self._network_refresh_inflight = False
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _build_bottom(self, parent):
         metrics = tk.Frame(parent, bg=BG)
@@ -1530,7 +3040,7 @@ class UltronGUI:
         log_header.pack_propagate(False)
         tk.Label(log_header, text="SYSTEM LOGS", font=self.font_small,
                  fg=ORANGE, bg=BG_PANEL2).pack(side=tk.LEFT, padx=10, pady=4)
-        tk.Label(log_header, text="â- LIVE", font=self.font_small,
+        tk.Label(log_header, text="● LIVE", font=self.font_small,
                  fg=GREEN, bg=BG_PANEL2).pack(side=tk.RIGHT, padx=10, pady=4)
 
         self.log_text = tk.Text(
@@ -1568,11 +3078,33 @@ class UltronGUI:
                 fg=color or TURQUOISE
             )
 
+    def _on_mic_hotkey(self, _event=None):
+        self._activate_consciousness()
+        return "break"
+
+    def _set_mic_indicator(self, active):
+        if not hasattr(self, "mic_button"):
+            return
+        if active:
+            self.mic_button.configure(
+                text="MIC · ESCUCHANDO · F8",
+                fg=BG,
+                bg=TURQUOISE,
+                activebackground=TURQUOISE,
+            )
+        else:
+            self.mic_button.configure(
+                text="MIC · F8",
+                fg=TEXT_DIM,
+                bg=BG_PANEL2,
+                activebackground=TURQUOISE,
+            )
+
     def _activate_consciousness(self):
         """
         PRIVACY GATE.
 
-        Ãšnicamente un clic del usuario sobre el CORE puede:
+        Únicamente un clic del usuario sobre el CORE puede:
           - autorizar el micrófono
           - iniciar CONCIENCIA
 
@@ -1598,20 +3130,35 @@ class UltronGUI:
             self._set_live_text("")
             self._set_consciousness_state(
                 "IDLE",
-                "â- SYSTEM ONLINE",
+                "● SYSTEM ONLINE",
                 TURQUOISE
             )
+            self._set_mic_indicator(False)
             self._add_log("PRIVACY: micrófono BLOQUEADO")
             return
+
+        # Ask for Groq credentials before authorizing the microphone. Without
+        # a key the voice loop fails before it can transcribe or speak.
+        api_key = self.groq_api_key or _load_groq_key(self.current_user)
+        if not api_key:
+            if not UltronAuth._show_groq_key_setup(self.root, self.current_user):
+                self._set_live_text("Configura tu API key de Groq para usar la voz.")
+                return
+            api_key = _load_groq_key(self.current_user)
+            if not api_key:
+                self._set_live_text("No se guardó la API key de Groq.")
+                return
+        self.groq_api_key = api_key
 
         # HARD ON: only reached from the Core click callback.
         self.mic_authorized = True
         self.consciousness_active = True
+        self._set_mic_indicator(True)
         self.consciousness_generation += 1
 
         generation = self.consciousness_generation
 
-        self._add_log("PRIVACY: micrófono autorizado por clic en CORE")
+        self._add_log("VOZ: micrófono activado; di un comando en español (F8 para detener)")
         self._begin_continuous_listening(generation)
 
     def _begin_continuous_listening(self, generation=None):
@@ -1629,10 +3176,11 @@ class UltronGUI:
             return
 
         self.ai_busy = True
+        self._set_mic_indicator(True)
         self._set_live_text("")
         self._set_consciousness_state(
             "LISTENING",
-            "CONCIENCIA ACTIVA",
+            "MICRÓFONO ESCUCHANDO",
             TURQUOISE
         )
 
@@ -1670,11 +3218,11 @@ class UltronGUI:
         generation = self.consciousness_generation
 
         if not getattr(self, "mic_authorized", False):
-            self._add_log("PRIVACY: captura rechazada â€” CORE no autorizado")
+            self._add_log("PRIVACY: captura rechazada — CORE no autorizado")
             return False
 
         if not getattr(self, "consciousness_active", False):
-            self._add_log("PRIVACY: captura rechazada â€” CONCIENCIA inactiva")
+            self._add_log("PRIVACY: captura rechazada — CONCIENCIA inactiva")
             return False
 
         try:
@@ -1726,12 +3274,11 @@ class UltronGUI:
             return
 
         try:
-            api_key = os.getenv("GROQ_API_KEY")
+            api_key = self.groq_api_key
             if not api_key:
                 raise RuntimeError(
-                    "No encuentro GROQ_API_KEY en el entorno. "
-                    "Abre ULTRON desde la misma terminal donde "
-                    "`echo $GROQ_API_KEY` muestra tu clave."
+                    "No hay una API key de Groq configurada para este usuario. "
+                    "Abre Conciencia y guarda tu clave para continuar."
                 )
 
             if not self.system.audio_ready():
@@ -1751,7 +3298,10 @@ class UltronGUI:
 
             # Se detiene automáticamente al detectar silencio.
             self._set_live_text("ESCUCHANDO...")
-            heard_voice = self._record_until_silence(wav_path)
+            heard_voice = self._record_until_silence(
+                wav_path,
+                input_device=self._resolve_input_device(),
+            )
             if not heard_voice:
                 self._set_live_text("")
                 return
@@ -1792,9 +3342,12 @@ class UltronGUI:
             recent = self.ai_history[1:][-12:]
             payload_history = [system_message] + recent
 
-            routed_tool = self._route_local_request(user_text)
+            voice_result = self._run_voice_command(user_text)
+            routed_tool = None if voice_result is not None else self._route_local_request(user_text)
 
-            if routed_tool:
+            if voice_result is not None:
+                response_text = voice_result
+            elif routed_tool:
                 self._safe_log(f"TOOL: {routed_tool}")
                 tool_result = self._execute_ai_tool(routed_tool)
                 response_text = tool_result or "No pude obtener ese dato."
@@ -1885,21 +3438,35 @@ class UltronGUI:
                     0,
                     lambda: self._set_consciousness_state(
                         "IDLE",
-                        "â- SYSTEM ONLINE",
+                        "● SYSTEM ONLINE",
                         TURQUOISE
                     )
                 )
 
     def _safe_log(self, text):
-        self.root.after(0, lambda t=text: self._add_log(t))
+        try:
+            self.root.after(0, lambda t=text: self._add_log(t))
+        except tk.TclError:
+            pass
 
     def _voice_error(self, message):
-        self._set_consciousness_state(
-            "IDLE",
-            "CONCIENCIA ACTIVA",
-            TURQUOISE
-        )
-        self._set_live_text("")
+        def show_error():
+            self.consciousness_active = False
+            self.mic_authorized = False
+            self.consciousness_generation += 1
+            self.ai_busy = False
+            self._set_mic_indicator(False)
+            self._set_consciousness_state(
+                "IDLE",
+                "ERROR DE CONCIENCIA",
+                RED
+            )
+            self._set_live_text(f"Error de voz: {message}")
+
+        try:
+            self.root.after(0, show_error)
+        except tk.TclError:
+            pass
 
     def _groq_transcribe(self, wav_path, api_key):
         """
@@ -1964,6 +3531,132 @@ class UltronGUI:
             )
 
         return data.get("text", "")
+
+    def _run_voice_command(self, user_text):
+        """Ejecuta solo comandos de voz explícitos y permitidos en el JSON."""
+        normalized = _normalize_voice_text(user_text)
+        result = None
+
+        if "bateria" in normalized and any(
+            word in normalized for word in ("cuanta", "queda", "porcentaje", "carga")
+        ):
+            battery = self.system.battery_status()
+            if battery is None:
+                result = "No se detectó una batería en este equipo."
+            else:
+                if battery.get("charging"):
+                    state = "está cargando"
+                    remaining = "El tiempo para descargarse no aplica mientras carga."
+                elif battery.get("plugged"):
+                    state = "está conectada a corriente"
+                    remaining = (
+                        "Tiempo restante estimado: "
+                        f"{self._format_remaining_time(battery.get('seconds_left'))}."
+                    )
+                else:
+                    state = "no está cargando"
+                    remaining = (
+                        "Tiempo restante estimado: "
+                        f"{self._format_remaining_time(battery.get('seconds_left'))}."
+                    )
+                result = (
+                    f"La batería está al {battery['percent']:.0f}% y {state}. "
+                    f"{remaining}"
+                )
+
+        elif (
+            ("disco" in normalized or "espacio" in normalized)
+            and any(word in normalized for word in ("cuanto", "queda", "libre"))
+        ):
+            try:
+                disk_root = Path.home().anchor or os.path.abspath(os.sep)
+                usage = psutil.disk_usage(disk_root) if HAS_PSUTIL else shutil.disk_usage(disk_root)
+                result = (
+                    f"Quedan {usage.free / (1024 ** 3):.1f} GB libres "
+                    f"de {usage.total / (1024 ** 3):.1f} GB en {disk_root}."
+                )
+            except Exception as exc:
+                result = f"No pude consultar el espacio del disco: {exc}"
+
+        elif normalized.startswith(("abre ", "abrir ")):
+            target = normalized.split(" ", 1)[1].strip()
+            target = re.sub(
+                r"^(?:la aplicacion|la app|el programa|la pagina web|el sitio web|"
+                r"pagina web|sitio web|la web de|web de|la pagina(?: de)?|"
+                r"el sitio(?: de)?|la|el)\s+",
+                "",
+                target,
+            ).strip()
+            candidates = [target]
+            if target.startswith("www "):
+                candidates.append(target[4:])
+            domain_without_suffix = re.sub(
+                r"\s+(?:com|org|net|edu|gov|mx|es)$", "", target
+            )
+            if domain_without_suffix != target:
+                candidates.append(domain_without_suffix)
+
+            websites = self.feature_config["voice"]["websites"]
+            site_lookup = {
+                _normalize_voice_text(alias): (alias, url)
+                for alias, url in websites.items()
+            }
+            site = next(
+                (site_lookup[candidate] for candidate in candidates if candidate in site_lookup),
+                None,
+            )
+            if site:
+                alias, url = site
+                result = (
+                    f"Abrí el sitio permitido: {alias}."
+                    if self.system.open_url(url)
+                    else f"No pude abrir el sitio permitido: {alias}."
+                )
+            else:
+                apps = self.feature_config["voice"]["apps"]
+                app_lookup = {
+                    _normalize_voice_text(alias): (alias, command)
+                    for alias, command in apps.items()
+                }
+                app = next(
+                    (app_lookup[candidate] for candidate in candidates if candidate in app_lookup),
+                    None,
+                )
+                if app:
+                    alias, command = app
+                    try:
+                        launch_target = command[0]
+                        if re.match(r"^[a-z][a-z0-9+.-]*:", launch_target, re.IGNORECASE):
+                            opened = self.system.open_url(launch_target)
+                            if not opened:
+                                raise RuntimeError(
+                                    "Windows no encontró una aplicación asociada a este enlace."
+                                )
+                        elif self.system.is_windows and launch_target.casefold() in {
+                            "chrome", "msedge", "firefox", "winword", "excel",
+                            "powerpnt", "code", "vlc",
+                        }:
+                            executable = shutil.which(launch_target)
+                            if not executable:
+                                raise FileNotFoundError(
+                                    f"No encontré {launch_target}.exe en PATH; "
+                                    "ajusta la ruta en config/ultron_features.json."
+                                )
+                            subprocess.Popen([executable, *command[1:]], shell=False)
+                        else:
+                            subprocess.Popen(command, shell=False)
+                        result = f"Abrí la aplicación permitida: {alias}."
+                    except Exception as exc:
+                        result = f"No pude abrir {alias}: {exc}"
+                else:
+                    result = (
+                        f"No abrí «{target}»: no está en la lista permitida "
+                        "de config/ultron_features.json."
+                    )
+
+        if result is not None:
+            self._safe_log(f"COMANDO DE VOZ: {user_text} | RESULTADO: {result}")
+        return result
 
     def _route_local_request(self, user_text):
         """Resuelve peticiones comunes localmente antes de llamar al modelo."""
@@ -2267,21 +3960,194 @@ class UltronGUI:
             self.root.after(40, tick)
         self.root.after(100, tick)
 
+    @staticmethod
+    def _format_remaining_time(seconds):
+        if seconds is None:
+            return "N/A"
+        hours, remainder = divmod(max(0, int(seconds)), 3600)
+        minutes = remainder // 60
+        if hours:
+            return f"{hours} h {minutes} min"
+        return f"{minutes} min"
+
+    def _battery_display_text(self, battery):
+        if not battery:
+            return "BATERÍA: N/A"
+        if battery.get("charging"):
+            state = "CARGANDO"
+            remaining = "N/A"
+        elif battery.get("plugged"):
+            state = "CONECTADA"
+            remaining = self._format_remaining_time(battery.get("seconds_left"))
+        else:
+            state = "DESCARGANDO"
+            remaining = self._format_remaining_time(battery.get("seconds_left"))
+        return (
+            f"BATERÍA: {battery['percent']:.0f}% · {state} · "
+            f"RESTANTE: {remaining}"
+        )
+
+    def _play_alert_beep(self):
+        if not self.feature_config["alerts"].get("beep_enabled", True):
+            return
+
+        def beep():
+            try:
+                import winsound
+                winsound.Beep(740, 90)
+            except Exception:
+                try:
+                    self.root.after(0, self.root.bell)
+                except tk.TclError:
+                    pass
+
+        threading.Thread(target=beep, daemon=True).start()
+
+    def _evaluate_health_alerts(self):
+        metrics = self._latest_health_metrics
+        thresholds = self.feature_config["alerts"]
+        current = {}
+
+        cpu = metrics.get("cpu")
+        cpu_limit = float(thresholds.get("cpu_percent", 85))
+        sustained_for = float(thresholds.get("cpu_sustained_seconds", 30))
+        if cpu is not None and cpu >= cpu_limit:
+            if self._cpu_high_since is None:
+                self._cpu_high_since = time.monotonic()
+            elif time.monotonic() - self._cpu_high_since >= sustained_for:
+                current["cpu"] = f"CPU alta sostenida: {cpu:.0f}% (umbral {cpu_limit:.0f}%)."
+        else:
+            self._cpu_high_since = None
+
+        memory = metrics.get("memory")
+        memory_limit = float(thresholds.get("memory_percent", 90))
+        if memory is not None and memory >= memory_limit:
+            current["memory"] = (
+                f"Memoria alta: {memory:.0f}% (umbral {memory_limit:.0f}%)."
+            )
+
+        disk = metrics.get("disk")
+        disk_limit = float(thresholds.get("disk_percent", 90))
+        if disk is not None and disk >= disk_limit:
+            current["disk"] = f"Disco casi lleno: {disk:.0f}% usado."
+
+        battery = metrics.get("battery")
+        battery_limit = float(thresholds.get("battery_percent", 15))
+        if (
+            battery
+            and not battery.get("plugged")
+            and battery.get("percent", 100) <= battery_limit
+        ):
+            current["battery"] = (
+                f"Batería baja: {battery['percent']:.0f}% "
+                f"(umbral {battery_limit:.0f}%)."
+            )
+
+        temperature = metrics.get("temperature")
+        temperature_limit = float(thresholds.get("temperature_c", 85))
+        if temperature is not None and temperature >= temperature_limit:
+            current["temperature"] = (
+                f"Temperatura de CPU alta: {temperature:.1f} °C "
+                f"(umbral {temperature_limit:.0f} °C)."
+            )
+        elif temperature is None and "temperature" in self._active_alerts:
+            current["temperature"] = self._active_alerts["temperature"]
+
+        snapshot = self._last_network_snapshot
+        if snapshot is not None:
+            interfaces = snapshot.get("interfaces", [])
+            failed_pings = max(
+                1, int(thresholds.get("network_loss_after_failures", 3))
+            )
+            if not interfaces or self._network_no_reply_count >= failed_pings:
+                current["network"] = "Conexión de red perdida o sin respuesta sostenida."
+            else:
+                ping_text = str(snapshot.get("ping") or "")
+                ping_match = re.search(
+                    r"[<>]?\s*(\d+(?:[.,]\d+)?)\s*ms",
+                    ping_text,
+                    re.IGNORECASE,
+                )
+                if ping_match:
+                    ping_ms = float(ping_match.group(1).replace(",", "."))
+                    ping_limit = float(thresholds.get("ping_ms", 180))
+                    if ping_ms > ping_limit:
+                        current["ping"] = (
+                            f"Ping alto: {ping_ms:.0f} ms "
+                            f"(umbral {ping_limit:.0f} ms)."
+                        )
+        elif "network" in self._active_alerts:
+            current["network"] = self._active_alerts["network"]
+        elif "ping" in self._active_alerts:
+            current["ping"] = self._active_alerts["ping"]
+
+        for key, message in current.items():
+            if key not in self._active_alerts:
+                self._add_log(f"ALERTA REAL: {message}")
+                self._play_alert_beep()
+        for key, message in self._active_alerts.items():
+            if key not in current:
+                self._add_log(f"ALERTA RESUELTA: {message}")
+
+        self._active_alerts = current
+        if not current:
+            self.threat_status_var.set("CONTROLLED")
+            self.threat_status_label.configure(fg=TURQUOISE)
+        elif len(current) == 1:
+            self.threat_status_var.set("ELEVATED")
+            self.threat_status_label.configure(fg=ORANGE_L)
+        else:
+            self.threat_status_var.set("HIGH")
+            self.threat_status_label.configure(fg=RED)
+
     def _update_metrics(self):
+        cpu = memory = disk = None
+        battery = None
+        temperature = None
         if HAS_PSUTIL:
             try:
-                self.metric_vars["cpu"].set(f"{psutil.cpu_percent():.0f} %")
-                self.metric_vars["ram"].set(f"{psutil.virtual_memory().percent:.0f} %")
-                self.metric_vars["disk"].set(f"{psutil.disk_usage('/').percent:.0f} %")
-                self.metric_vars["net"].set("connected")
+                cpu = float(psutil.cpu_percent(interval=None))
+                memory = float(psutil.virtual_memory().percent)
+                disk_root = Path.home().anchor or os.path.abspath(os.sep)
+                disk = float(psutil.disk_usage(disk_root).percent)
             except Exception:
                 pass
-        else:
-            self.metric_vars["cpu"].set("-- %")
-            self.metric_vars["ram"].set("-- %")
-            self.metric_vars["disk"].set("-- %")
-            self.metric_vars["net"].set("N/A")
-        self.root.after(2000, self._update_metrics)
+        try:
+            battery = self.system.battery_status()
+        except Exception:
+            pass
+        try:
+            temperature = self.system.cpu_temperature()
+        except Exception:
+            pass
+
+        self._latest_health_metrics = {
+            "cpu": cpu,
+            "memory": memory,
+            "disk": disk,
+            "battery": battery,
+            "temperature": temperature,
+        }
+        if hasattr(self, "metric_vars"):
+            self.metric_vars["cpu"].set(f"{cpu:.0f} %" if cpu is not None else "N/A")
+            self.metric_vars["ram"].set(
+                f"{memory:.0f} %" if memory is not None else "N/A"
+            )
+            self.metric_vars["disk"].set(
+                f"{disk:.0f} %" if disk is not None else "N/A"
+            )
+            self.metric_vars["net"].set(
+                "online" if self.network_interfaces else "offline"
+            )
+        if hasattr(self, "battery_status_var"):
+            self.battery_status_var.set(self._battery_display_text(battery))
+            self.cpu_temperature_var.set(
+                f"CPU: {temperature:.1f} °C" if temperature is not None else "CPU: N/A"
+            )
+
+        self._evaluate_health_alerts()
+        interval = max(1.0, float(self.feature_config["alerts"].get("sample_seconds", 5)))
+        self.root.after(int(interval * 1000), self._update_metrics)
 
     def _add_log(self, msg):
         self.log_text.configure(state=tk.NORMAL)
@@ -2309,6 +4175,40 @@ class UltronGUI:
         self._add_log("Module CONCIENCIA selected")
         self._close_active_module()
 
+        # Revisa la clave guardada y comprueba que Groq aún la acepte.
+        api_key = self.groq_api_key or _load_groq_key(self.current_user)
+        if not api_key:
+            if not UltronAuth._show_groq_key_setup(self.root, self.current_user):
+                return
+            api_key = _load_groq_key(self.current_user)
+            if not api_key:
+                return
+            self.groq_api_key = api_key
+
+        startup_notice = ""
+        validation, validation_message = _validate_groq_api_key(api_key, timeout=4)
+        if validation == "invalid":
+            from tkinter import messagebox
+
+            replace_key = messagebox.askyesno(
+                "ULTRON // API KEY RECHAZADA",
+                validation_message + "\n\n¿Quieres configurar otra clave?",
+                parent=self.root,
+            )
+            if not replace_key:
+                self.groq_api_key = ""
+                return
+            if not UltronAuth._show_groq_key_setup(self.root, self.current_user):
+                return
+            api_key = _load_groq_key(self.current_user)
+            if not api_key:
+                return
+            self.groq_api_key = api_key
+        elif validation == "unverified":
+            startup_notice = validation_message
+
+        self.groq_api_key = api_key
+
         win = tk.Toplevel(self.root)
         self._active_module_window = win
         win.title("ULTRON - CONCIENCIA")
@@ -2329,7 +4229,9 @@ class UltronGUI:
             bg=BG_PANEL2
         ).pack(side=tk.LEFT, padx=18, pady=10)
 
-        status_var = tk.StringVar(value="IA LISTA")
+        status_var = tk.StringVar(
+            value="IA LISTA" if not startup_notice else "SIN VERIFICAR"
+        )
         tk.Label(
             header,
             textvariable=status_var,
@@ -2409,6 +4311,8 @@ class UltronGUI:
                 append(role, item.get("content", ""))
         else:
             append("ULTRON", "Chat de texto listo. Escribe un mensaje.")
+        if startup_notice:
+            append("SYSTEM", startup_notice)
 
         def finish_response(user_text, response_text):
             if not win.winfo_exists():
@@ -2433,11 +4337,11 @@ class UltronGUI:
 
         def worker(user_text):
             try:
-                api_key = os.getenv("GROQ_API_KEY")
+                api_key = self.groq_api_key
                 if not api_key:
                     raise RuntimeError(
-                        "No encuentro la clave de Groq configurada en Windows. "
-                        "El chat usa la misma GROQ_API_KEY que el CORE."
+                        "No hay una API key de Groq configurada para este usuario. "
+                        "Abre Conciencia y guarda tu clave para continuar."
                     )
 
                 routed_tool = self._route_local_request(user_text)
@@ -2504,26 +4408,41 @@ class UltronGUI:
 
     def _on_files(self):
         self._add_log(f"Module ARCHIVOS selected [{self.system.os_name()}]")
-        self._show_module("ARCHIVOS", self.system.files_module())
+        self._show_module("ALMACENAMIENTO", self.system.files_module())
 
-    def _run_command_async(self, command, output_widget, title="COMANDO"):
+    def _run_command_async(
+        self, command, output_widget, title="COMANDO", action_label=None
+    ):
         """Ejecuta comandos sin congelar la interfaz."""
+        if not callable(command):
+            if isinstance(command, str):
+                command = shlex.split(command, posix=not self.system.is_windows)
+            else:
+                command = [str(part) for part in command]
+            if not command:
+                return
         output_widget.configure(state=tk.NORMAL)
         output_widget.delete("1.0", tk.END)
-        output_widget.insert(tk.END, f"> {command}\n\nEjecutando...\n")
+        output_widget.insert(
+            tk.END,
+            f"{action_label or 'ULTRON'}\n\nConsultando información...\n",
+        )
         output_widget.configure(state=tk.DISABLED)
 
         def worker():
             try:
-                result = subprocess.run(
-                    command,
-                    shell=True,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    timeout=120
-                )
-                text = result.stdout.strip() or "(Sin salida)"
+                if callable(command):
+                    text = command()
+                else:
+                    result = subprocess.run(
+                        command,
+                        shell=False,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        timeout=120
+                    )
+                    text = result.stdout.strip() or "(Sin salida)"
             except subprocess.TimeoutExpired:
                 text = (
                     "El comando tardó demasiado.\n\n"
@@ -2548,24 +4467,61 @@ class UltronGUI:
         threading.Thread(target=worker, daemon=True).start()
 
     def _run_admin_terminal(self, command):
-        """Abre PowerShell elevado en Windows para comandos administrativos."""
+        """Abre una terminal apropiada al sistema para el comando indicado."""
         try:
-            ps_command = (
-                "Start-Process powershell.exe -Verb RunAs "
-                "-ArgumentList @('-NoExit','-Command'," + repr(command) + ")"
-            )
-            subprocess.Popen(
-                ["powershell.exe", "-NoProfile", "-Command", ps_command],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            if isinstance(command, (tuple, list)):
+                command = (
+                    subprocess.list2cmdline([str(part) for part in command])
+                    if self.system.is_windows
+                    else shlex.join(str(part) for part in command)
+                )
+            if self.system.is_windows:
+                ps_command = (
+                    "Start-Process powershell.exe -Verb RunAs "
+                    "-ArgumentList @('-NoExit','-Command'," + repr(command) + ")"
+                )
+                subprocess.Popen(
+                    ["powershell.exe", "-NoProfile", "-Command", ps_command],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            elif self.system.is_linux:
+                if command.strip() in {"x-terminal-emulator", "terminal"}:
+                    if self.system.open_terminal():
+                        return
+                    raise RuntimeError("No encontré una terminal compatible.")
+
+                script = (
+                    f"{command}; result=$?; printf '\\n\\nCódigo de salida: %s\\n' \"$result\"; "
+                    "read -r -p 'Presiona Enter para cerrar...'"
+                )
+                terminal_commands = [
+                    ["x-terminal-emulator", "-e", "bash", "-lc", script],
+                    ["gnome-terminal", "--", "bash", "-lc", script],
+                    ["konsole", "-e", "bash", "-lc", script],
+                    ["xfce4-terminal", "--command", f"bash -lc {shlex.quote(script)}"],
+                    ["kitty", "bash", "-lc", script],
+                    ["alacritty", "-e", "bash", "-lc", script],
+                ]
+                for terminal_command in terminal_commands:
+                    if shutil.which(terminal_command[0]):
+                        subprocess.Popen(
+                            terminal_command,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        break
+                else:
+                    raise RuntimeError("No encontré una terminal compatible.")
+            else:
+                raise RuntimeError(f"Sistema no compatible: {self.system.os_name()}")
+
             self._add_log(f"Terminal administrativa: {command}")
-            return
         except Exception as exc:
             self._show_module(
-                "COMANDO ADMINISTRATIVO",
-                f"No pude abrir PowerShell como administrador.\\n\\n{exc}\\n\\nComando:\\n{command}"
+                "TERMINAL ADMINISTRATIVA",
+                f"No pude abrir una terminal.\n\n{exc}\n\nComando:\n{command}"
             )
 
     def _hud_panel(self, parent, bg=None, border=None, pad=13):
@@ -2644,7 +4600,7 @@ class UltronGUI:
         self._close_active_module()
         """Ventana reutilizable para módulos de comandos."""
         win = tk.Toplevel(self.root)
-        win.title(f"ULTRON â€” {title}")
+        win.title(f"ULTRON — {title}")
         win.configure(bg=BG)
         win.geometry("780x560")
         win.minsize(650, 480)
@@ -2720,7 +4676,9 @@ class UltronGUI:
 
         def run_normal(label, command):
             self._add_log(f"{title}: {label}")
-            self._run_command_async(command, output, title)
+            self._run_command_async(
+                command, output, title, action_label=label
+            )
 
         def run_search():
             value = search_var.get().strip()
@@ -2730,8 +4688,20 @@ class UltronGUI:
                 output.insert(tk.END, "Escribe primero el nombre del paquete.")
                 output.configure(state=tk.DISABLED)
                 return
-            command = search_action.format(query=subprocess.list2cmdline([value]))
-            run_normal("buscar", command)
+            # These queries are interpolated into shell commands. Windows
+            # list2cmdline quoting is not cmd.exe escaping, so reject shell
+            # metacharacters before constructing the command on either OS.
+            if len(value) > 100 or not re.fullmatch(r"[A-Za-z0-9_.+@ -]+", value):
+                output.configure(state=tk.NORMAL)
+                output.delete("1.0", tk.END)
+                output.insert(
+                    tk.END,
+                    "La búsqueda solo admite letras, números, espacios y . _ + @ -.",
+                )
+                output.configure(state=tk.DISABLED)
+                return
+            command = [*search_action, value]
+            run_normal(f"Resultados para «{value}»", command)
 
         if search_action:
             tk.Button(
@@ -2772,9 +4742,16 @@ class UltronGUI:
                 pady=8
             ).pack(fill=tk.X, padx=10, pady=3)
 
+        admin_note = (
+            "Las acciones administrativas se abren en PowerShell con "
+            "confirmación de Windows cuando sea necesario."
+            if self.system.is_windows else
+            "Las acciones administrativas se abren en una terminal; "
+            "sudo puede solicitar tu contraseña."
+        )
         tk.Label(
             controls,
-            text="Las acciones administrativas se abren\nen PowerShell con confirmacion\nde Windows cuando sea necesario.",
+            text=admin_note,
             font=self.font_small,
             fg=TEXT_DIM,
             bg=BG_PANEL,
@@ -2816,30 +4793,49 @@ class UltronGUI:
 
     def _on_packages(self):
         self._add_log("Module PAQUETES selected")
+        if self.system.is_windows:
+            actions = [
+                {"label": "Programas instalados", "command": self.system.installed_programs},
+                {"label": "Actualizar repositorios", "command": ["winget", "source", "update"]},
+                {"label": "Actualizar sistema", "command": ["winget", "upgrade", "--all", "--accept-source-agreements", "--accept-package-agreements"]},
+                {"label": "Limpiar paquetes", "command": ["winget", "upgrade", "--accept-source-agreements"]},
+            ]
+            search_action = ["winget", "search", "--accept-source-agreements"]
+        elif shutil.which("apt"):
+            actions = [
+                {"label": "Programas instalados", "command": self.system.installed_programs},
+                {"label": "Actualizar repositorios", "command": ["sudo", "apt", "update"], "admin": True},
+                {"label": "Actualizar sistema", "command": ["sudo", "apt", "upgrade"], "admin": True},
+                {"label": "Limpiar paquetes", "command": ["sudo", "apt", "autoremove"], "admin": True},
+            ]
+            search_action = ["apt-cache", "search"]
+        elif shutil.which("dnf"):
+            actions = [
+                {"label": "Programas instalados", "command": self.system.installed_programs},
+                {"label": "Actualizar repositorios", "command": ["sudo", "dnf", "makecache"], "admin": True},
+                {"label": "Actualizar sistema", "command": ["sudo", "dnf", "upgrade"], "admin": True},
+                {"label": "Limpiar paquetes", "command": ["sudo", "dnf", "autoremove"], "admin": True},
+            ]
+            search_action = ["dnf", "search"]
+        elif shutil.which("pacman"):
+            actions = [
+                {"label": "Programas instalados", "command": self.system.installed_programs},
+                {"label": "Actualizar repositorios", "command": ["sudo", "pacman", "-Sy"], "admin": True},
+                {"label": "Actualizar sistema", "command": ["sudo", "pacman", "-Syu"], "admin": True},
+                {"label": "Limpiar paquetes", "command": ["sudo", "pacman", "-Sc"], "admin": True},
+            ]
+            search_action = ["pacman", "-Ss"]
+        else:
+            self._show_module(
+                "GESTOR DE PAQUETES",
+                "No detecté winget, apt, dnf ni pacman en este sistema.",
+            )
+            return
+
         self._module_action_window(
             "GESTOR DE PAQUETES",
-            actions=[
-                {
-                    "label": "Ver paquetes instalados",
-                    "command": "winget list --accept-source-agreements"
-                },
-                {
-                    "label": "Actualizar repositorios",
-                    "command": "winget source update",
-                    "admin": False
-                },
-                {
-                    "label": "Actualizar sistema",
-                    "command": "winget upgrade --all --accept-source-agreements --accept-package-agreements",
-                    "admin": False
-                },
-                {
-                    "label": "Limpiar paquetes",
-                    "command": "winget upgrade --accept-source-agreements",
-                    "admin": False
-                },
-            ],
-            search_action="winget search --accept-source-agreements {query}"
+            actions=actions,
+            search_action=search_action,
         )
 
     # ============================================================
@@ -2850,7 +4846,7 @@ class UltronGUI:
         self._add_log("Module CHAT WIFI selected")
 
         win = tk.Toplevel(self.root)
-        win.title("ULTRON â€” CHAT WIFI")
+        win.title("ULTRON — CHAT WIFI")
         win.configure(bg=BG)
         win.geometry("880x600")
         win.minsize(720, 500)
@@ -2876,7 +4872,7 @@ class UltronGUI:
             font=self.font_title, fg=ORANGE, bg=BG_PANEL2
         ).pack(side=tk.LEFT, padx=16, pady=8)
 
-        status_var = tk.StringVar(value="â- DESCONECTADO")
+        status_var = tk.StringVar(value="● DESCONECTADO")
         status_lbl = tk.Label(
             header, textvariable=status_var,
             font=self.font_small, fg=RED, bg=BG_PANEL2
@@ -2894,7 +4890,7 @@ class UltronGUI:
         center.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         tk.Label(
-            left, text="CONEXIÃ“N",
+            left, text="CONEXIÓN",
             font=self.font_small, fg=ORANGE, bg=BG_PANEL
         ).pack(anchor="w", padx=10, pady=(10, 8))
 
@@ -2991,7 +4987,7 @@ class UltronGUI:
                     return
                 users_list.delete(0, tk.END)
                 for name in names:
-                    users_list.insert(tk.END, f"â-  {name}")
+                    users_list.insert(tk.END, f"• {name}")
                 users_var.set(f"Usuarios: {len(names)}")
             self.root.after(0, update)
 
@@ -3034,7 +5030,7 @@ class UltronGUI:
             set_users(names)
 
         def handle_server_client(client, address, username):
-            ui_log(f"â-  {username} se conectÃ³ ({address[0]}).")
+            ui_log(f"• {username} se conectó ({address[0]}).")
             server_broadcast(f"SYS:{username} se conectó.", exclude=client)
             server_send_users()
             buffer = ""
@@ -3065,7 +5061,7 @@ class UltronGUI:
                     client.close()
                 except Exception:
                     pass
-                ui_log(f"â-  {username} se desconectÃ³.")
+                ui_log(f"• {username} se desconectó.")
                 server_broadcast(f"SYS:{username} se desconectó.")
                 server_send_users()
 
@@ -3128,7 +5124,7 @@ class UltronGUI:
             state["mode"] = "server"
             state["username"] = username
 
-            ui_status(f"â- SERVIDOR :{port}", GREEN)
+            ui_status(f"● SERVIDOR :{port}", GREEN)
             ui_log(f"Servidor iniciado en el puerto {port}.")
             ui_log("Los otros equipos deben conectarse a la IP de este equipo.")
             set_users([username])
@@ -3159,7 +5155,7 @@ class UltronGUI:
                         elif line.startswith("MSG:"):
                             ui_log(line[4:])
                         elif line.startswith("SYS:"):
-                            ui_log("â-  " + line[4:])
+                            ui_log("• " + line[4:])
                         else:
                             ui_log(line)
             except Exception as exc:
@@ -3203,7 +5199,7 @@ class UltronGUI:
             state["mode"] = "client"
             state["username"] = username
 
-            ui_status(f"â- CONECTADO {host}:{port}", TURQUOISE)
+            ui_status(f"● CONECTADO {host}:{port}", TURQUOISE)
             ui_log(f"Conectado a {host}:{port}.")
             self._add_log(f"CHAT conectado a {host}:{port}")
 
@@ -3259,7 +5255,7 @@ class UltronGUI:
                 state["server"] = None
 
             state["mode"] = None
-            ui_status("â- DESCONECTADO", RED)
+            ui_status("● DESCONECTADO", RED)
             set_users([])
             ui_log("Chat desconectado.")
             self._add_log("CHAT desconectado")
@@ -3431,7 +5427,9 @@ class UltronGUI:
         self.root.update_idletasks()
 
     def _list_audio_sources(self):
-        """Devuelve fuentes de audio visibles en PipeWire/PulseAudio."""
+        """Devuelve fuentes de audio visibles en el sistema."""
+        if self.system.is_windows:
+            return self.system.input_devices()
         devices = []
         try:
             out = subprocess.check_output(
@@ -3471,6 +5469,8 @@ class UltronGUI:
     def _resolve_input_device(self):
         if self.audio_input_device and self.audio_input_device != "Automático":
             return self.audio_input_device
+        if self.system.is_windows:
+            return self.system.default_input()
         try:
             return subprocess.check_output(
                 ["pactl", "get-default-source"],
@@ -3526,65 +5526,24 @@ class UltronGUI:
 
             self.root.after(
                 0,
-                lambda: self._show_module("PRUEBA DE MICRÃ“FONO", msg)
+                lambda: self._show_module("PRUEBA DE MICRÓFONO", msg)
             )
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _test_voice_output(self, parent=None):
-        """Genera una frase corta y la reproduce en la salida seleccionada."""
+        """Prueba la voz neural mediante el adaptador de audio del sistema."""
         def worker():
             try:
-                espeak = shutil.which("espeak-ng") or shutil.which("espeak")
-                paplay = shutil.which("paplay")
-
-                if not espeak or not paplay:
-                    raise RuntimeError(
-                        "Falta espeak-ng/espeak o paplay."
-                    )
-
-                tmp = tempfile.NamedTemporaryFile(
-                    prefix="ultron_voice_test_",
-                    suffix=".wav",
-                    delete=False
-                )
-                path = tmp.name
-                tmp.close()
-
-                subprocess.run(
-                    [
-                        espeak,
-                        "-v", "es",
-                        "-s", "150",
-                        "-p", "42",
-                        "-w", path,
-                        "Sistema de audio de Ultron operativo."
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=20
-                )
-
                 device = self._resolve_output_device()
-                cmd = ["paplay"]
-                if device:
-                    cmd.append(f"--device={device}")
-                cmd.append(path)
-
-                subprocess.run(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=20
+                self.system.speak(
+                    "Sistema de audio de ULTRON operativo.",
+                    output_device=device or None,
+                    volume=self.ultron_volume,
                 )
-                msg = f"Prueba enviada a:\n{device or 'salida predeterminada'}"
+                msg = f"Prueba de voz completada.\nSalida: {device or 'predeterminada'}"
             except Exception as exc:
                 msg = f"Error probando salida de audio:\n{exc}"
-            finally:
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
 
             self.root.after(
                 0,
@@ -3597,7 +5556,7 @@ class UltronGUI:
         self._add_log("Module PREFERENCIAS selected")
 
         win = tk.Toplevel(self.root)
-        win.title("ULTRON â€” PREFERENCIAS")
+        win.title("ULTRON — PREFERENCIAS")
         win.configure(bg=BG)
         win.geometry("900x600")
         win.minsize(760, 520)
@@ -3613,7 +5572,7 @@ class UltronGUI:
         ).pack(side=tk.LEFT, padx=18, pady=9)
 
         status = tk.Label(
-            header, text="â- LIVE THEME ENGINE",
+            header, text="● LIVE THEME ENGINE",
             font=self.font_small, fg=TURQUOISE, bg=BG_PANEL2
         )
         status.pack(side=tk.RIGHT, padx=18)
@@ -3724,7 +5683,7 @@ class UltronGUI:
         }
 
         tk.Label(
-            preview_side, text="VISUALIZACIÃ“N PREVIA",
+            preview_side, text="VISUALIZACIÓN PREVIA",
             font=self.font_small, fg=ORANGE, bg=BG_PANEL
         ).pack(anchor="w", padx=12, pady=(12, 4))
 
@@ -3773,7 +5732,7 @@ class UltronGUI:
                 anchor="w", fill=pri, font=self.font_small
             )
             preview.create_text(
-                w-30, 38, text="â- ONLINE",
+                w-30, 38, text="● ONLINE",
                 anchor="e", fill=sec, font=self.font_small
             )
 
@@ -3899,9 +5858,12 @@ class UltronGUI:
             self._apply_theme_live(theme)
             save_theme_config({"theme": name})
             self._add_log(f"Apariencia aplicada en vivo: {name}")
-            status.configure(text=f"â- {name} APLICADO", fg=TURQUOISE)
+            status.configure(text=f"● {name} APLICADO", fg=TURQUOISE)
 
-        for name in THEMES:
+        for column in range(3):
+            preset_frame.columnconfigure(column, weight=1)
+
+        for index, name in enumerate(THEMES):
             btn = tk.Button(
                 preset_frame,
                 text=name,
@@ -3912,11 +5874,17 @@ class UltronGUI:
                 activebackground=GRAY,
                 relief=tk.FLAT,
                 cursor="hand2",
-                padx=9,
+                padx=5,
                 pady=7,
                 command=lambda n=name: apply_preset(n)
             )
-            btn.pack(side=tk.LEFT, padx=3, pady=4)
+            btn.grid(
+                row=index // 3,
+                column=index % 3,
+                sticky="ew",
+                padx=3,
+                pady=4,
+            )
 
         tk.Frame(controls, bg=GRAY2, height=1).pack(fill=tk.X, pady=14)
 
@@ -4082,7 +6050,7 @@ class UltronGUI:
 
         tk.Button(
             audio_buttons,
-            text="[ PROBAR MICRÃ“FONO ]",
+            text="[ PROBAR MICRÓFONO ]",
             font=self.font_small,
             fg=TURQUOISE,
             bg=BG_PANEL2,
@@ -4115,7 +6083,7 @@ class UltronGUI:
             theme = build_theme_from_vars()
             self._apply_theme_live(theme)
             self._add_log("Vista previa aplicada temporalmente")
-            status.configure(text="â- PREVIEW ACTIVO", fg=TURQUOISE)
+            status.configure(text="● PREVIEW ACTIVO", fg=TURQUOISE)
 
         def save_custom():
             custom = build_theme_from_vars()
@@ -4125,7 +6093,7 @@ class UltronGUI:
             })
             self._apply_theme_live(custom)
             self._add_log("Apariencia personalizada guardada y aplicada")
-            status.configure(text="â- PERSONALIZADO GUARDADO", fg=GREEN)
+            status.configure(text="● PERSONALIZADO GUARDADO", fg=GREEN)
 
         tk.Button(
             actions,
@@ -4171,7 +6139,7 @@ class UltronGUI:
     def _show_module(self, title, content):
         self._close_active_module()
         win = tk.Toplevel(self.root)
-        win.title(f"ULTRON â€” {title}")
+        win.title(f"ULTRON — {title}")
         win.configure(bg=BG)
         win.geometry("700x500")
         win.minsize(560, 400)
@@ -4235,7 +6203,7 @@ class UltronGUI:
 
         tk.Label(
             title_row,
-            text="â- ONLINE",
+            text="● ONLINE",
             font=self.font_small,
             fg=TURQUOISE,
             bg="#080808"
@@ -4313,7 +6281,29 @@ class UltronGUI:
 
 
 
+def _bring_main_window_to_front(root):
+    """Raise the GUI portably; briefly use topmost only on Windows."""
+    try:
+        if not root.winfo_exists():
+            return
+        root.deiconify()
+        if os.name == "nt":
+            root.attributes("-topmost", True)
+        root.lift()
+        root.focus_force()
+        if os.name == "nt":
+            root.after(
+                700,
+                lambda: root.attributes("-topmost", False)
+                if root.winfo_exists() else None,
+            )
+    except tk.TclError:
+        pass
+
+
 def main():
+    # Do not propagate a legacy/shared API key into child processes.
+    os.environ.pop("GROQ_API_KEY", None)
     root = tk.Tk()
     root.withdraw()
 
@@ -4322,6 +6312,7 @@ def main():
     if saved_user:
         root.deiconify()
         app = UltronGUI(root, current_user=saved_user)
+        root.after(120, lambda: _bring_main_window_to_front(root))
         root.mainloop()
         return
 
@@ -4334,6 +6325,7 @@ def main():
 
     root.deiconify()
     app = UltronGUI(root, current_user=auth.username)
+    root.after(120, lambda: _bring_main_window_to_front(root))
     root.mainloop()
 
 

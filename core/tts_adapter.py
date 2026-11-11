@@ -3,20 +3,20 @@
 ULTRON PANEL V3 // TTS ADAPTER
 Voz multiplataforma Linux + Windows.
 
-GeneraciÃ³n:
+Generación:
     edge-tts -> es-MX-JorgeNeural
 
-Procesamiento/reproducciÃ³n:
+Procesamiento/reproducción:
     ffplay + filtros FFmpeg en tiempo real
 
 Linux:
-    Puede ajustar volumen mediante pactl si estÃ¡ disponible.
+    Puede ajustar volumen mediante pactl si está disponible.
 
 Windows:
     No depende de pactl/PulseAudio. ffplay usa la salida predeterminada
     de Windows.
 
-Este mÃ³dulo no clona la voz de ninguna persona real.
+Este módulo no clona la voz de ninguna persona real.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ class TTSAdapter:
         self._lock = threading.Lock()
 
     # ---------------------------------------------------------
-    # DiagnÃ³stico
+    # Diagnóstico
     # ---------------------------------------------------------
     def edge_tts_path(self):
         path = shutil.which("edge-tts")
@@ -86,7 +86,7 @@ class TTSAdapter:
         )
 
     # ---------------------------------------------------------
-    # ConfiguraciÃ³n
+    # Configuración
     # ---------------------------------------------------------
     def set_volume(self, value):
         try:
@@ -101,7 +101,7 @@ class TTSAdapter:
             self.voice = str(voice)
 
     # ---------------------------------------------------------
-    # SÃ­ntesis
+    # Síntesis
     # ---------------------------------------------------------
     def prepare_speech(self, text):
         text = str(text).strip()
@@ -179,7 +179,7 @@ class TTSAdapter:
     @staticmethod
     def ultron_filter():
         """
-        Mantiene el carÃ¡cter de la versiÃ³n actual:
+        Mantiene el carácter de la versión actual:
         grave, grueso, comprimido, borde digital y eco corto.
         """
         return (
@@ -237,7 +237,7 @@ class TTSAdapter:
             pass
 
     # ---------------------------------------------------------
-    # ReproducciÃ³n
+    # Reproducción
     # ---------------------------------------------------------
     def play_prepared_speech(self, speech_path, output_device=None):
         if not os.path.exists(speech_path):
@@ -249,7 +249,7 @@ class TTSAdapter:
         if not ffplay and not mpv:
             raise RuntimeError(
                 "Falta ffplay/FFmpeg o mpv. "
-                "En Windows instala FFmpeg y aÃ±Ã¡delo al PATH."
+                "En Windows instala FFmpeg y añádelo al PATH."
             )
 
         # Linux puede conservar el volumen/sink actual.
@@ -284,7 +284,11 @@ class TTSAdapter:
                     )
                 self._process = subprocess.Popen(cmd, **popen_kwargs)
 
-            self._process.wait()
+            return_code = self._process.wait()
+            if return_code:
+                raise RuntimeError(
+                    f"El reproductor de audio terminó con código {return_code}."
+                )
 
         finally:
             with self._lock:
@@ -296,7 +300,9 @@ class TTSAdapter:
                 pass
 
     def speak(self, text, output_device=None):
-        # Misma ruta de voz que la version de la Vaio: JorgeNeural + filtro ULTRON.
+        # Mantén siempre la voz neural de ULTRON. El respaldo SAPI de Windows
+        # suena distinto y puede degradar la experiencia; si Edge TTS falla,
+        # deja que la GUI muestre el error real.
         speech_path = self.prepare_speech(text)
         self.play_prepared_speech(
             speech_path,
@@ -304,7 +310,7 @@ class TTSAdapter:
         )
 
     def stop(self):
-        """Detiene inmediatamente la voz que se estÃ© reproduciendo."""
+        """Detiene inmediatamente la voz que se esté reproduciendo."""
         with self._lock:
             process = self._process
             self._process = None
@@ -335,14 +341,14 @@ class TTSAdapter:
         wav.close()
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
-            # Voz neural masculina mexicana; ligeramente mÃ¡s lenta antes del efecto.
+            # Voz neural masculina mexicana; ligeramente más lenta antes del efecto.
             subprocess.run(
                 [edge, "--voice", "es-MX-JorgeNeural", "--rate=-6%",
                  "--text", str(text), "--write-media", mp3.name],
                 check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=flags,
             )
-            # Timbre mÃ¡s oscuro + resonancia mecÃ¡nica sutil + eco corto.
+            # Timbre más oscuro + resonancia mecánica sutil + eco corto.
             af = (
                 "asetrate=44100*0.88,aresample=44100,"
                 "equalizer=f=120:t=q:w=1.1:g=5,"
@@ -391,11 +397,22 @@ class TTSAdapter:
             "$null=$v.Speak($t)"
         )
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=flags,
-        )
+        try:
+            subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=45,
+                check=True,
+                creationflags=flags,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            detail = getattr(exc, "stderr", "")
+            detail = (detail or str(exc)).strip()[:240]
+            raise RuntimeError(
+                "La voz local de Windows no pudo reproducirse. " + detail
+            ) from exc
 
     def diagnostics(self):
         return {

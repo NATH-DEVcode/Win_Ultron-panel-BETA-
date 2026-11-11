@@ -44,7 +44,7 @@ echo [5/5] Creando lanzador...
 > "INICIAR-ULTRON-WINDOWS.bat" echo @echo off
 >>"INICIAR-ULTRON-WINDOWS.bat" echo cd /d "%%~dp0"
 >>"INICIAR-ULTRON-WINDOWS.bat" echo set "PATH=%%LocalAppData%%\Microsoft\WinGet\Links;%%PATH%%"
->>"INICIAR-ULTRON-WINDOWS.bat" echo ".venv\Scripts\pythonw.exe" -m gui.ultron
+>>"INICIAR-ULTRON-WINDOWS.bat" echo start "" ".venv\Scripts\pythonw.exe" launcher.py
 
 echo.
 echo ==========================================

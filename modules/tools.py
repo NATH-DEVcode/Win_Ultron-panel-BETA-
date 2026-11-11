@@ -8,7 +8,7 @@ def run_command(command):
     try:
         result = subprocess.check_output(
             command,
-            shell=True,
+            shell=False,
             text=True,
             stderr=subprocess.DEVNULL
         )
@@ -70,7 +70,7 @@ def tools_menu():
 
             print(
                 run_command(
-                    "which nmap sqlmap aircrack-ng hydra"
+                    ["which", "nmap", "sqlmap", "aircrack-ng", "hydra"]
                 )
             )
 
@@ -88,7 +88,7 @@ def tools_menu():
 
             print(
                 run_command(
-                    f"apt-cache search {package}"
+                    ["apt-cache", "search", package]
                 )
             )
 
@@ -104,7 +104,7 @@ def tools_menu():
 
             print(
                 run_command(
-                    "sudo apt update"
+                    ["sudo", "apt", "update"]
                 )
             )
 
@@ -118,7 +118,7 @@ def tools_menu():
 
             print(
                 run_command(
-                    "python3 --version"
+                    ["python3", "--version"]
                 )
             )
 
@@ -132,7 +132,7 @@ def tools_menu():
 
             print(
                 run_command(
-                    "cat /etc/os-release"
+                    ["cat", "/etc/os-release"]
                 )
             )
 

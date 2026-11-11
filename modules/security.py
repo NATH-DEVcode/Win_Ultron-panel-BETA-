@@ -8,7 +8,7 @@ def run_command(command):
     try:
         result = subprocess.check_output(
             command,
-            shell=True,
+            shell=False,
             text=True,
             stderr=subprocess.DEVNULL
         )
@@ -75,7 +75,7 @@ Analizando puertos del equipo...
             )
 
             result = run_command(
-                "ss -tuln"
+                ["ss", "-tuln"]
             )
 
             print(result)
@@ -93,7 +93,7 @@ Estado del firewall:
             )
 
             result = run_command(
-                "systemctl status ufw --no-pager"
+                ["systemctl", "status", "ufw", "--no-pager"]
             )
 
             print(result)
@@ -111,7 +111,7 @@ Servicios activos:
             )
 
             result = run_command(
-                "systemctl --type=service --state=running"
+                ["systemctl", "--type=service", "--state=running", "--no-pager"]
             )
 
             print(result)
@@ -129,7 +129,7 @@ Procesos del sistema:
             )
 
             result = run_command(
-                "ps aux --sort=-%cpu | head -15"
+                ["ps", "-eo", "pid,comm,%cpu", "--sort=-%cpu"]
             )
 
             print(result)
@@ -149,7 +149,7 @@ Sistema:
             )
 
             result = run_command(
-                "uname -a"
+                ["uname", "-a"]
             )
 
             print(result)

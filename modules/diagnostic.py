@@ -8,7 +8,7 @@ def run_command(command):
     try:
         result = subprocess.check_output(
             command,
-            shell=True,
+            shell=False,
             text=True,
             stderr=subprocess.DEVNULL
         )
@@ -70,7 +70,7 @@ def diagnostic_menu():
 
             print(
                 run_command(
-                    "lscpu | grep 'Model name'"
+                    ["lscpu"]
                 )
             )
 
@@ -84,7 +84,7 @@ def diagnostic_menu():
 
             print(
                 run_command(
-                    "free -h"
+                    ["free", "-h"]
                 )
             )
 
@@ -98,7 +98,7 @@ def diagnostic_menu():
 
             print(
                 run_command(
-                    "df -h"
+                    ["df", "-h"]
                 )
             )
 
@@ -112,7 +112,7 @@ def diagnostic_menu():
 
             print(
                 run_command(
-                    "ps aux --sort=-%cpu | head -15"
+                    ["ps", "-eo", "pid,comm,%cpu", "--sort=-%cpu"]
                 )
             )
 
@@ -126,7 +126,7 @@ def diagnostic_menu():
 
             print(
                 run_command(
-                    "sensors"
+                    ["sensors"]
                 )
             )
 

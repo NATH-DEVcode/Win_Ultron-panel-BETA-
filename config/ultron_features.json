@@ -1,0 +1,53 @@
+{
+  "voice": {
+    "apps": {
+      "calculadora": ["calc.exe"],
+      "bloc de notas": ["notepad.exe"],
+      "explorador de archivos": ["explorer.exe"],
+      "paint": ["mspaint.exe"],
+      "wordpad": ["write.exe"],
+      "administrador de tareas": ["taskmgr.exe"],
+      "panel de control": ["control.exe"],
+      "configuracion de windows": ["ms-settings:"],
+      "captura de pantalla": ["SnippingTool.exe"],
+      "mapas": ["bingmaps:"],
+      "chrome": ["chrome"],
+      "google chrome": ["chrome"],
+      "edge": ["msedge"],
+      "microsoft edge": ["msedge"],
+      "firefox": ["firefox"],
+      "spotify": ["spotify:"],
+      "steam": ["steam://open/main"],
+      "steam juegos": ["steam://open/main"],
+      "epic games": ["com.epicgames.launcher://apps"],
+      "epic games launcher": ["com.epicgames.launcher://apps"],
+      "minecraft": ["minecraft:"],
+      "word": ["winword"],
+      "excel": ["excel"],
+      "powerpoint": ["powerpnt"],
+      "visual studio code": ["code"],
+      "vscode": ["code"],
+      "discord": ["discord:"],
+      "zoom": ["zoommtg:"],
+      "vlc": ["vlc"]
+    },
+    "websites": {
+      "google": "https://www.google.com/",
+      "youtube": "https://www.youtube.com/",
+      "whatsapp": "https://web.whatsapp.com/",
+      "chatgpt": "https://chatgpt.com/"
+    }
+  },
+  "alerts": {
+    "sample_seconds": 5,
+    "cpu_percent": 85,
+    "cpu_sustained_seconds": 30,
+    "memory_percent": 90,
+    "disk_percent": 90,
+    "battery_percent": 15,
+    "temperature_c": 85,
+    "ping_ms": 180,
+    "network_loss_after_failures": 3,
+    "beep_enabled": true
+  }
+}

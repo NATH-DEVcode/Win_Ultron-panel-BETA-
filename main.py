@@ -34,11 +34,11 @@ def main():
 
         menu = """
 1. Conciencia
-2. Gestion
+2. Gestión
 3. Sistema
 4. Red
 5. Seguridad
-6. Diagnostico
+6. Diagnóstico
 7. Preferencias
 8. Estado de ULTRON
 9. Chat local
@@ -52,7 +52,7 @@ S. Salir
             "ULTRON PANEL"
         )
 
-        option = input("\nSeleccione una opcion: ")
+        option = input("\nSeleccione una opción: ")
 
         nav = check_navigation(option)
 
@@ -106,7 +106,7 @@ Cerrando sistema...
             print("""
 ULTRON:
 
-Opcion no valida.
+Opción no válida.
 """)
 
             input("\nENTER para continuar...")
